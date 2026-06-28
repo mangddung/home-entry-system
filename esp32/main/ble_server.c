@@ -1,0 +1,742 @@
+#include "ble_server.h"
+#include "app_config.h"
+#include "device_config.h"
+#include "http_api.h"
+#include "led_indicator.h"
+
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "host/util/util.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_random.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/event_groups.h"
+#include "psa/crypto.h"
+#include "cJSON.h"
+#include <inttypes.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include <ctype.h>
+
+static const char *TAG = "ble";
+
+// ── State ─────────────────────────────────────────────────────────────────────
+static uint16_t s_conn_handle  = BLE_HS_CONN_HANDLE_NONE;
+static uint16_t s_notify_handle;               // value handle for char_esp_to_app
+static char     s_current_otp[7] = "";         // 6-hex-char OTP + NUL
+
+static esp_timer_handle_t s_auth_timer = NULL;
+static bool s_adv_enabled  = false;            // normal mode: init 완료 후 true
+static bool s_setup_mode   = false;            // setup 모드 여부
+
+// ── UUID storage (populated at runtime from g_cfg) ────────────────────────────
+static ble_uuid128_t s_svc_uuid;
+static ble_uuid128_t s_chr_read_uuid;
+static ble_uuid128_t s_chr_write_uuid;
+
+// ── Setup mode state ──────────────────────────────────────────────────────────
+typedef struct {
+    char data[512];
+} setup_msg_t;
+
+static QueueHandle_t    s_setup_queue = NULL;
+static TaskHandle_t     s_setup_task  = NULL;
+static ble_uuid128_t    s_setup_svc_uuid;
+static ble_uuid128_t    s_setup_read_uuid;
+static ble_uuid128_t    s_setup_write_uuid;
+static uint16_t         s_setup_notify_handle;
+
+// Setup WiFi
+static EventGroupHandle_t s_setup_wifi_eg = NULL;
+#define SETUP_WIFI_OK_BIT    BIT0
+#define SETUP_WIFI_FAIL_BIT  BIT1
+static bool s_setup_wifi_driver_init = false;
+
+// Parse "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" into NimBLE little-endian layout
+static bool parse_uuid128(const char *str, ble_uuid128_t *out)
+{
+    uint8_t buf[16];
+    int idx = 0;
+    const char *p = str;
+    while (*p && idx < 16) {
+        if (*p == '-') { p++; continue; }
+        if (!*(p + 1)) return false;
+        char hex[3] = {p[0], p[1], 0};
+        buf[idx++] = (uint8_t)strtol(hex, NULL, 16);
+        p += 2;
+    }
+    if (idx != 16) return false;
+    out->u.type = BLE_UUID_TYPE_128;
+    for (int k = 0; k < 16; k++) out->value[k] = buf[15 - k];
+    return true;
+}
+
+// ── Forward declarations ───────────────────────────────────────────────────────
+static void ble_advertise(void);
+static int  gap_event_handler(struct ble_gap_event *event, void *arg);
+
+// ── Auth timeout ──────────────────────────────────────────────────────────────
+static void auth_timeout_cb(void *arg)
+{
+    if (s_current_otp[0] != '\0') {
+        ESP_LOGW(TAG, "Auth timeout – OTP discarded");
+        s_current_otp[0] = '\0';
+    }
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+}
+
+static void auth_timer_start(void)
+{
+    if (s_auth_timer == NULL) {
+        esp_timer_create_args_t args = {
+            .callback = auth_timeout_cb,
+            .name     = "auth_tmr",
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&args, &s_auth_timer));
+    }
+    esp_timer_stop(s_auth_timer);
+    esp_timer_start_once(s_auth_timer, (uint64_t)AUTH_TIMEOUT_MS * 1000);
+}
+
+static void auth_timer_stop(void)
+{
+    if (s_auth_timer) esp_timer_stop(s_auth_timer);
+}
+
+// ── GATT characteristic callbacks ─────────────────────────────────────────────
+
+static int chr_notify_access(uint16_t conn_handle, uint16_t attr_handle,
+                              struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        // App reads current OTP
+        os_mbuf_append(ctxt->om, s_current_otp, strlen(s_current_otp));
+    }
+    return 0;
+}
+
+static void process_write_payload(const char *msg, uint16_t len)
+{
+    auth_timer_stop();
+
+    // Payload format: "<36-char UUID>:<ciphertext>"
+    if (len < 38) {
+        ESP_LOGE(TAG, "Payload too short (%u bytes)", len);
+        return;
+    }
+
+    const char *colon = memchr(msg, ':', len);
+    if (!colon || (colon - msg) != 36) {
+        ESP_LOGE(TAG, "Invalid payload format (colon at %ld, expected 36)",
+                 colon ? (long)(colon - msg) : -1L);
+        return;
+    }
+
+    size_t cipher_len = len - 37;   // after the ':'
+    if (cipher_len < 64 || cipher_len % 32 != 0) {
+        ESP_LOGE(TAG, "Ciphertext length invalid (%zu)", cipher_len);
+        return;
+    }
+
+    char uuid[37];
+    memcpy(uuid, msg, 36);
+    uuid[36] = '\0';
+
+    if (cipher_len >= 2048) {
+        ESP_LOGE(TAG, "Ciphertext too long (%zu)", cipher_len);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Format OK – UUID: %s", uuid);
+
+    char nonce[7];
+    strlcpy(nonce, s_current_otp, sizeof(nonce));
+    s_current_otp[0] = '\0';
+
+    // buf is heap-allocated and null-terminated, so colon+1 is safe to pass directly
+    http_request_validate_token(uuid, colon + 1, nonce);
+}
+
+static int chr_write_access(uint16_t conn_handle, uint16_t attr_handle,
+                             struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return 0;
+
+    uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    if (len >= 2100) {
+        ESP_LOGE(TAG, "Write too large (%u bytes) – ignored", len);
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    char *buf = malloc(len + 1);
+    if (!buf) {
+        ESP_LOGE(TAG, "OOM for write buffer");
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    ble_hs_mbuf_to_flat(ctxt->om, buf, len, NULL);
+    buf[len] = '\0';
+    ESP_LOGI(TAG, "Received (%u bytes)", len);
+    process_write_payload(buf, len);
+    free(buf);
+    return 0;
+}
+
+// ── GATT service table ────────────────────────────────────────────────────────
+static const struct ble_gatt_svc_def s_gatt_svcs[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &s_svc_uuid.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            {
+                // char_esp_to_app: read | notify
+                .uuid       = &s_chr_read_uuid.u,
+                .access_cb  = chr_notify_access,
+                .val_handle = &s_notify_handle,
+                .flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                // char_app_to_esp: write (with response)
+                .uuid      = &s_chr_write_uuid.u,
+                .access_cb = chr_write_access,
+                .flags     = BLE_GATT_CHR_F_WRITE,
+            },
+            { 0 }, // terminator
+        },
+    },
+    { 0 }, // terminator
+};
+
+// ── Advertising ───────────────────────────────────────────────────────────────
+#define ADV_DURATION_MS  60000
+#define ADV_PAUSE_MS     3000
+
+static void adv_pause_task(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(ADV_PAUSE_MS));
+    if (s_adv_enabled && s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        struct ble_gap_adv_params params = {
+            .conn_mode = BLE_GAP_CONN_MODE_UND,
+            .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        };
+        struct ble_hs_adv_fields fields = {
+            .flags              = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
+            .name               = (const uint8_t *)BLE_DEVICE_NAME,
+            .name_len           = strlen(BLE_DEVICE_NAME),
+            .name_is_complete   = 1,
+            .uuids128           = &s_svc_uuid,
+            .num_uuids128       = 1,
+            .uuids128_is_complete = 1,
+        };
+        ble_gap_adv_set_fields(&fields);
+        ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, ADV_DURATION_MS,
+                          &params, gap_event_handler, NULL);
+        ESP_LOGI(TAG, "BLE advertising (6s)");
+    }
+    vTaskDelete(NULL);
+}
+
+static void ble_advertise(void)
+{
+    struct ble_gap_adv_params params = {
+        .conn_mode = BLE_GAP_CONN_MODE_UND,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
+    };
+    struct ble_hs_adv_fields fields = {
+        .flags              = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
+        .name               = (const uint8_t *)BLE_DEVICE_NAME,
+        .name_len           = strlen(BLE_DEVICE_NAME),
+        .name_is_complete   = 1,
+        .uuids128           = &s_svc_uuid,
+        .num_uuids128       = 1,
+        .uuids128_is_complete = 1,
+    };
+    ble_gap_adv_set_fields(&fields);
+    ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, ADV_DURATION_MS,
+                      &params, gap_event_handler, NULL);
+    ESP_LOGI(TAG, "BLE advertising (3s) svc=%s read=%s write=%s mfr=%s",
+             g_cfg.ble_svc_uuid, g_cfg.ble_chr_read_uuid,
+             g_cfg.ble_chr_write_uuid, g_cfg.manufacturer_uuid);
+}
+
+void ble_advertising_start(void)
+{
+    s_adv_enabled = true;
+    ble_advertise();
+}
+
+void ble_server_disconnect(void)
+{
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE)
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+}
+
+// ── Connect task: generate OTP, wait 3 s, then notify ────────────────────────
+static void connect_task(void *arg)
+{
+    uint16_t conn_handle = (uint16_t)(uintptr_t)arg;
+
+    // Generate 6-digit hex OTP
+    uint32_t rnd = esp_random() & 0x00FFFFFF;
+    snprintf(s_current_otp, sizeof(s_current_otp), "%06" PRIx32, rnd);
+    ESP_LOGI(TAG, "OTP issued: %s", s_current_otp);
+
+    // Wait before notifying (allows app to subscribe first)
+    vTaskDelay(pdMS_TO_TICKS(BLE_NOTIFY_DELAY_MS));
+
+    // Start auth timeout
+    auth_timer_start();
+
+    // Send notification
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(s_current_otp, 6);
+        if (om) {
+            ble_gatts_notify_custom(conn_handle, s_notify_handle, om);
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+// ── GAP event handler ─────────────────────────────────────────────────────────
+static int gap_event_handler(struct ble_gap_event *event, void *arg)
+{
+    switch (event->type) {
+        case BLE_GAP_EVENT_CONNECT:
+            if (event->connect.status == 0) {
+                ESP_LOGI(TAG, "App connected (handle %d)", event->connect.conn_handle);
+                s_conn_handle = event->connect.conn_handle;
+                xTaskCreate(connect_task, "ble_conn", 4096,
+                            (void *)(uintptr_t)s_conn_handle, 5, NULL);
+            } else {
+                ble_advertise();
+            }
+            break;
+
+        case BLE_GAP_EVENT_DISCONNECT:
+            ESP_LOGI(TAG, "App disconnected (reason %d)", event->disconnect.reason);
+            auth_timer_stop();
+            s_current_otp[0] = '\0';
+            s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            if (s_adv_enabled) ble_advertise();
+            break;
+
+        case BLE_GAP_EVENT_ADV_COMPLETE:
+            ESP_LOGI(TAG, "BLE adv ended – pausing %dms", ADV_PAUSE_MS);
+            if (s_adv_enabled && s_conn_handle == BLE_HS_CONN_HANDLE_NONE)
+                xTaskCreate(adv_pause_task, "adv_pause", 2048, NULL, 3, NULL);
+            break;
+
+        default:
+            break;
+    }
+    return 0;
+}
+
+// ── NimBLE host task ──────────────────────────────────────────────────────────
+static void ble_host_task(void *param)
+{
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+
+// ── Sync callback (stack ready) ───────────────────────────────────────────────
+static void setup_ble_advertise(void);   // forward declaration
+
+static void on_ble_sync(void)
+{
+    ble_hs_util_ensure_addr(1);
+    ble_att_set_preferred_mtu(512);
+    if (s_setup_mode) {
+        setup_ble_advertise();
+    } else {
+        ESP_LOGI(TAG, "BLE stack ready – waiting for init OK to start advertising");
+    }
+}
+
+static void on_ble_reset(int reason)
+{
+    ESP_LOGW(TAG, "BLE host reset (reason %d)", reason);
+}
+
+// ── Public init ───────────────────────────────────────────────────────────────
+void ble_server_init(void)
+{
+    if (!parse_uuid128(g_cfg.ble_svc_uuid,      &s_svc_uuid)   ||
+        !parse_uuid128(g_cfg.ble_chr_read_uuid,  &s_chr_read_uuid) ||
+        !parse_uuid128(g_cfg.ble_chr_write_uuid, &s_chr_write_uuid)) {
+        ESP_LOGE(TAG, "Invalid BLE UUID in config – using defaults");
+        parse_uuid128(BLE_SVC_UUID_DEFAULT,  &s_svc_uuid);
+        parse_uuid128(BLE_CHR_READ_DEFAULT,  &s_chr_read_uuid);
+        parse_uuid128(BLE_CHR_WRITE_DEFAULT, &s_chr_write_uuid);
+    }
+
+    ESP_ERROR_CHECK(nimble_port_init());
+
+    ble_hs_cfg.sync_cb  = on_ble_sync;
+    ble_hs_cfg.reset_cb = on_ble_reset;
+
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    ESP_ERROR_CHECK(ble_svc_gap_device_name_set(BLE_DEVICE_NAME));
+    ESP_ERROR_CHECK(ble_gatts_count_cfg(s_gatt_svcs));
+    ESP_ERROR_CHECK(ble_gatts_add_svcs(s_gatt_svcs));
+
+    nimble_port_freertos_init(ble_host_task);
+    ESP_LOGI(TAG, "BLE server initialized");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SETUP MODE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── SHA256 helper ─────────────────────────────────────────────────────────────
+// 설정 코드를 소문자로 정규화한 뒤 sha256(code_lower + nonce) 계산
+static void compute_sha256_hex(const char *code, const char *nonce, char out_hex[65])
+{
+    char code_lower[16] = {0};
+    for (int i = 0; code[i] && i < (int)sizeof(code_lower) - 1; i++)
+        code_lower[i] = (char)tolower((unsigned char)code[i]);
+
+    char input[32];
+    snprintf(input, sizeof(input), "%s%s", code_lower, nonce);
+    uint8_t hash[32];
+    size_t hash_len;
+    psa_hash_compute(PSA_ALG_SHA_256, (const unsigned char *)input, strlen(input), hash, sizeof(hash), &hash_len);
+    for (int i = 0; i < 32; i++)
+        snprintf(out_hex + i * 2, 3, "%02x", hash[i]);
+    out_hex[64] = '\0';
+}
+
+// ── Setup WiFi helper ─────────────────────────────────────────────────────────
+static void setup_wifi_event_handler(void *arg, esp_event_base_t base,
+                                      int32_t id, void *data)
+{
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        xEventGroupSetBits(s_setup_wifi_eg, SETUP_WIFI_FAIL_BIT);
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        xEventGroupSetBits(s_setup_wifi_eg, SETUP_WIFI_OK_BIT);
+    }
+}
+
+// Returns true if WiFi connected and IP obtained within SETUP_WIFI_TIMEOUT_MS.
+// esp_netif_init() and esp_event_loop_create_default() must already be called.
+static bool setup_wifi_connect(const char *ssid, const char *pw)
+{
+    if (!s_setup_wifi_driver_init) {
+        s_setup_wifi_eg = xEventGroupCreate();
+        esp_netif_create_default_wifi_sta();
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+        ESP_ERROR_CHECK(esp_event_handler_register(
+            WIFI_EVENT, ESP_EVENT_ANY_ID, setup_wifi_event_handler, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_register(
+            IP_EVENT, IP_EVENT_STA_GOT_IP, setup_wifi_event_handler, NULL));
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+        s_setup_wifi_driver_init = true;
+    } else {
+        esp_wifi_disconnect();
+        esp_wifi_stop();
+    }
+
+    wifi_config_t wifi_cfg = {0};
+    strlcpy((char *)wifi_cfg.sta.ssid,     ssid, sizeof(wifi_cfg.sta.ssid));
+    strlcpy((char *)wifi_cfg.sta.password, pw,   sizeof(wifi_cfg.sta.password));
+    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+
+    xEventGroupClearBits(s_setup_wifi_eg, SETUP_WIFI_OK_BIT | SETUP_WIFI_FAIL_BIT);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_wifi_connect();
+
+    EventBits_t bits = xEventGroupWaitBits(
+        s_setup_wifi_eg,
+        SETUP_WIFI_OK_BIT | SETUP_WIFI_FAIL_BIT,
+        pdFALSE, pdFALSE,
+        pdMS_TO_TICKS(SETUP_WIFI_TIMEOUT_MS));
+
+    return (bits & SETUP_WIFI_OK_BIT) != 0;
+}
+
+// ── Setup notify helper ───────────────────────────────────────────────────────
+static void setup_notify(const char *msg)
+{
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(msg, strlen(msg));
+    if (om) ble_gatts_notify_custom(s_conn_handle, s_setup_notify_handle, om);
+}
+
+// ── Setup flow task ───────────────────────────────────────────────────────────
+static void setup_flow_task(void *arg)
+{
+    (void)arg;
+    setup_msg_t msg;
+
+    // Wait for app to subscribe before notifying
+    vTaskDelay(pdMS_TO_TICKS(BLE_NOTIFY_DELAY_MS));
+
+    // Step 3: generate and send nonce
+    uint32_t rnd = esp_random() & 0x00FFFFFF;
+    char nonce[7];
+    snprintf(nonce, sizeof(nonce), "%06" PRIx32, rnd);
+    setup_notify(nonce);
+    ESP_LOGI(TAG, "Setup: nonce     = [%s]", nonce);
+    ESP_LOGI(TAG, "Setup: setup_code = [%s]", SETUP_CODE);
+
+    // Step 4: wait for sha256(setup_code + nonce) from app
+    if (xQueueReceive(s_setup_queue, &msg, pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "Setup: SHA256 timeout");
+        goto disconnect;
+    }
+
+    // Step 4: validate sha256(setup_code_lower + nonce)
+    char expected[65];
+    compute_sha256_hex(SETUP_CODE, nonce, expected);
+    ESP_LOGI(TAG, "Setup: received  = [%s]", msg.data);
+    ESP_LOGI(TAG, "Setup: expected  = [%s]", expected);
+    if (strncmp(msg.data, expected, 64) != 0) {
+        ESP_LOGW(TAG, "Setup: SHA256 mismatch");
+        goto disconnect;
+    }
+    ESP_LOGI(TAG, "Setup: SHA256 valid");
+
+    // Step 5: send device_uuid to app
+    ESP_LOGI(TAG, "Setup: sending device_uuid = [%s] (%d bytes)",
+             IOT_DEVICE_UUID, (int)strlen(IOT_DEVICE_UUID));
+    setup_notify(IOT_DEVICE_UUID);
+
+    // Steps 6–9: credential receive + WiFi + server validation loop
+    int retry_count = 0;
+    TickType_t cred_wait = pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS);
+
+    while (retry_count < SETUP_MAX_RETRIES) {
+        // Step 6: wait for {"setup_token":"...","ssid":"...","pw":"..."}
+        if (xQueueReceive(s_setup_queue, &msg, cred_wait) != pdTRUE) {
+            ESP_LOGW(TAG, "Setup: credentials timeout");
+            goto disconnect;
+        }
+
+        cJSON *root = cJSON_Parse(msg.data);
+        if (!root) {
+            ESP_LOGE(TAG, "Setup: invalid JSON credentials");
+            goto disconnect;
+        }
+        cJSON *jtok  = cJSON_GetObjectItemCaseSensitive(root, "setup_token");
+        cJSON *jssid = cJSON_GetObjectItemCaseSensitive(root, "wifi_ssid");
+        cJSON *jpw   = cJSON_GetObjectItemCaseSensitive(root, "wifi_pw");
+        cJSON *juuid = cJSON_GetObjectItemCaseSensitive(root, "user_uuid");
+
+        if (!cJSON_IsString(jtok) || !cJSON_IsString(jssid) ||
+            !cJSON_IsString(jpw)  || !cJSON_IsString(juuid)) {
+            cJSON_Delete(root);
+            ESP_LOGE(TAG, "Setup: missing JSON fields");
+            goto disconnect;
+        }
+
+        char setup_token[256], wifi_ssid[CFG_SSID_LEN], wifi_pw[CFG_PW_LEN];
+        char user_uuid[CFG_UUID_LEN];
+        strlcpy(setup_token, jtok->valuestring,  sizeof(setup_token));
+        strlcpy(wifi_ssid,   jssid->valuestring, sizeof(wifi_ssid));
+        strlcpy(wifi_pw,     jpw->valuestring,   sizeof(wifi_pw));
+        strlcpy(user_uuid,   juuid->valuestring, sizeof(user_uuid));
+        cJSON_Delete(root);
+
+        // Step 7: ACK receipt
+        setup_notify("ACK");
+
+        // Step 8: try WiFi
+        ESP_LOGI(TAG, "Setup: connecting WiFi \"%s\"", wifi_ssid);
+        if (!setup_wifi_connect(wifi_ssid, wifi_pw)) {
+            retry_count++;
+            ESP_LOGW(TAG, "Setup: WiFi failed (retry %d/%d)", retry_count, SETUP_MAX_RETRIES);
+            setup_notify("WIFI_FAIL");
+            cred_wait = pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS);
+            continue;
+        }
+        ESP_LOGI(TAG, "Setup: WiFi connected");
+
+        // Step 8: validate setup_token with server (retry on 5xx)
+        int status = 0;
+        for (int srv_try = 0; srv_try < SETUP_MAX_RETRIES; srv_try++) {
+            status = http_validate_setup(setup_token, user_uuid);
+            if (status == 200 || (status >= 400 && status < 500)) break;
+            ESP_LOGW(TAG, "Setup: server error %d – retry %d", status, srv_try + 1);
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        }
+
+        if (status == 200) {
+            // Step 9: send REGISTERED
+            setup_notify("REGISTERED");
+            vTaskDelay(pdMS_TO_TICKS(500));  // give notification time to deliver
+            // Step 10: save to NVS and reboot (never returns)
+            device_config_set_setup_complete(wifi_ssid, wifi_pw);
+        }
+
+        // Token rejected by server
+        retry_count++;
+        ESP_LOGW(TAG, "Setup: token invalid (HTTP %d), retry %d/%d",
+                 status, retry_count, SETUP_MAX_RETRIES);
+        setup_notify("TOKEN_FAIL");
+        cred_wait = pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS);
+    }
+
+disconnect:
+    ESP_LOGW(TAG, "Setup: flow ended – cleaning up");
+    // 먼저 NULL로 표시해야 disconnect 이벤트에서 중복 삭제 방지
+    s_setup_task = NULL;
+    if (s_setup_queue) {
+        setup_msg_t tmp;
+        while (xQueueReceive(s_setup_queue, &tmp, 0) == pdTRUE) {}
+        vQueueDelete(s_setup_queue);
+        s_setup_queue = NULL;
+    }
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE)
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    vTaskDelete(NULL);
+}
+
+// ── Setup GATT ────────────────────────────────────────────────────────────────
+static int setup_chr_notify_access(uint16_t conn_handle, uint16_t attr_handle,
+                                    struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle; (void)attr_handle; (void)arg;
+    return 0;
+}
+
+static int setup_chr_write_access(uint16_t conn_handle, uint16_t attr_handle,
+                                   struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle; (void)attr_handle; (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return 0;
+
+    uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    if (len >= sizeof(setup_msg_t)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+
+    setup_msg_t msg;
+    ble_hs_mbuf_to_flat(ctxt->om, msg.data, len, NULL);
+    msg.data[len] = '\0';
+
+    if (s_setup_queue) xQueueSend(s_setup_queue, &msg, 0);
+    return 0;
+}
+
+static const struct ble_gatt_svc_def s_setup_gatt_svcs[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &s_setup_svc_uuid.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            {
+                .uuid       = &s_setup_read_uuid.u,
+                .access_cb  = setup_chr_notify_access,
+                .val_handle = &s_setup_notify_handle,
+                .flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                .uuid      = &s_setup_write_uuid.u,
+                .access_cb = setup_chr_write_access,
+                .flags     = BLE_GATT_CHR_F_WRITE,
+            },
+            { 0 },
+        },
+    },
+    { 0 },
+};
+
+// ── Setup GAP event handler ───────────────────────────────────────────────────
+static int setup_gap_event_handler(struct ble_gap_event *event, void *arg)
+{
+    switch (event->type) {
+        case BLE_GAP_EVENT_CONNECT:
+            if (event->connect.status == 0) {
+                ESP_LOGI(TAG, "Setup: app connected (handle %d)",
+                         event->connect.conn_handle);
+                s_conn_handle = event->connect.conn_handle;
+                led_ble_connected();  // solid blue while connected
+                // 이전 태스크/큐 잔재가 있으면 정리 후 새로 시작
+                if (s_setup_task) { vTaskDelete(s_setup_task); s_setup_task = NULL; }
+                if (s_setup_queue) { vQueueDelete(s_setup_queue); s_setup_queue = NULL; }
+                s_setup_queue = xQueueCreate(4, sizeof(setup_msg_t));
+                xTaskCreate(setup_flow_task, "setup_flow", 8192,
+                            NULL, 5, &s_setup_task);
+            } else {
+                setup_ble_advertise();
+            }
+            break;
+
+        case BLE_GAP_EVENT_DISCONNECT:
+            ESP_LOGI(TAG, "Setup: app disconnected (reason %d)",
+                     event->disconnect.reason);
+            s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            led_idle_blink_start();  // back to blue blink while waiting
+            // 태스크가 먼저 정리했으면 NULL, 앱이 먼저 끊으면 여기서 kill
+            if (s_setup_task) { vTaskDelete(s_setup_task); s_setup_task = NULL; }
+            if (s_setup_queue) { vQueueDelete(s_setup_queue); s_setup_queue = NULL; }
+            setup_ble_advertise();
+            break;
+
+        case BLE_GAP_EVENT_ADV_COMPLETE:
+            setup_ble_advertise();
+            break;
+
+        default:
+            break;
+    }
+    return 0;
+}
+
+// ── Setup advertising (continuous) ───────────────────────────────────────────
+static void setup_ble_advertise(void)
+{
+    struct ble_gap_adv_params params = {
+        .conn_mode = BLE_GAP_CONN_MODE_UND,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
+    };
+    struct ble_hs_adv_fields fields = {
+        .flags              = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
+        .name               = (const uint8_t *)BLE_DEVICE_NAME,
+        .name_len           = strlen(BLE_DEVICE_NAME),
+        .name_is_complete   = 1,
+        .uuids128           = &s_setup_svc_uuid,
+        .num_uuids128       = 1,
+        .uuids128_is_complete = 1,
+    };
+    ble_gap_adv_set_fields(&fields);
+    ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, BLE_HS_FOREVER,
+                      &params, setup_gap_event_handler, NULL);
+    ESP_LOGI(TAG, "BLE setup advertising (continuous)");
+}
+
+// ── Public setup init ─────────────────────────────────────────────────────────
+void ble_setup_server_init(void)
+{
+    s_setup_mode = true;
+
+    parse_uuid128(SETUP_SERVICE_UUID, &s_setup_svc_uuid);
+    parse_uuid128(SETUP_READ_UUID,    &s_setup_read_uuid);
+    parse_uuid128(SETUP_WRITE_UUID,   &s_setup_write_uuid);
+
+    ESP_ERROR_CHECK(nimble_port_init());
+
+    ble_hs_cfg.sync_cb  = on_ble_sync;
+    ble_hs_cfg.reset_cb = on_ble_reset;
+
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    ESP_ERROR_CHECK(ble_svc_gap_device_name_set(BLE_DEVICE_NAME));
+    ESP_ERROR_CHECK(ble_gatts_count_cfg(s_setup_gatt_svcs));
+    ESP_ERROR_CHECK(ble_gatts_add_svcs(s_setup_gatt_svcs));
+
+    nimble_port_freertos_init(ble_host_task);
+    ESP_LOGI(TAG, "BLE setup server initialized");
+}

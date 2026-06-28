@@ -1,0 +1,41 @@
+Bluedroid_Beacon
+
+# claude
+.claude
+
+# Build artifacts
+build/
+*.bin
+*.elf
+*.map
+*.o
+*.a
+sdkconfig
+sdkconfig.old
+
+# ESP-IDF component manager
+managed_components/
+dependencies.lock
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Sensitive config (copy app_config.h.example → app_config.h and fill in values)
+main/app_config.h
+
+# IDE
+.vscode/
+compile_commands.json
+.clangd/
+.ccls-cache/
+
+# OS
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.log
+
+generate_config.py

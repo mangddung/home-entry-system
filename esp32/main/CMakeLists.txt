@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "device_config.c"
+        "led_indicator.c"
+        "servo_motor.c"
+        "ble_server.c"
+        "http_api.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_http_client
+        bt
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_timer
+        led_strip
+        espressif__cjson
+        mbedtls
+)
