@@ -1,3 +1,4 @@
 *.md
 devlinks.html
 *.bat
+.claude/

@@ -1,7 +1,8 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { fetchDeviceSetupToken, fetchSetupUuid } from "@/lib/api/devices";
-import { connectDevice, receiveData, scanDevice, sendSetupCode, sendWifiSetup, stopScan } from "@/lib/ble";
+import { connectDevice, receiveData, scanDevice, sendSetupCode, sendWifiSetup, stopScan, triggerPairing } from "@/lib/ble";
+import NetInfo from "@react-native-community/netinfo";
 import { DEVICE_SETUP_KEY, UNFIGURED_DEVICES_KEY } from "@/lib/constants";
 import { getTokenSecure, setTokenSecure } from "@/lib/token-storage";
 import { IoTDevice } from "@/lib/types";
@@ -178,6 +179,16 @@ export default function DeviceSetupScreen() {
       };
     }, [startScan]),
   );
+
+  // Wi-Fi SSID 자동 입력
+  useEffect(() => {
+    if (proccess !== 3) return;
+    NetInfo.fetch("wifi").then((state) => {
+      if (state.type === "wifi" && state.details?.ssid) {
+        setWifiSsid(state.details.ssid);
+      }
+    });
+  }, [proccess]);
 
   // 셋업 코드 입력 타이머
   useEffect(() => {
@@ -501,11 +512,13 @@ export default function DeviceSetupScreen() {
             >
               <MaterialCommunityIcons
                 name={
-                  (isScanning
-                    ? "bluetooth"
-                    : devices.length > 0
-                      ? "bluetooth-connect"
-                      : "bluetooth-off") as any
+                  (isConnecting
+                    ? "bluetooth-connect"
+                    : isScanning
+                      ? "bluetooth"
+                      : devices.length > 0
+                        ? "bluetooth-connect"
+                        : "bluetooth-off") as any
                 }
                 size={38}
                 color={colors.tint}
@@ -515,22 +528,28 @@ export default function DeviceSetupScreen() {
 
           <View style={styles.statusTextWrap}>
             <Text style={[styles.statusTitle, { color: colors.text }]}>
-              {isScanning
-                ? "주변 기기를 스캔하고 있습니다"
-                : devices.length > 0
-                  ? "스캔 완료"
-                  : "기기를 찾지 못했습니다"}
+              {isConnecting
+                ? "기기와 보안 연결 중..."
+                : isScanning
+                  ? "주변 기기를 스캔하고 있습니다"
+                  : devices.length > 0
+                    ? "스캔 완료"
+                    : "기기를 찾지 못했습니다"}
             </Text>
             <Text style={[styles.statusSub, { color: colors.tabIconDefault }]}>
-              {isScanning
-                ? "기기의 전원이 켜져 있는지 확인해 주세요"
-                : devices.length > 0
-                  ? "연결할 기기를 선택하세요"
-                  : "기기를 켜고 재스캔을 시도해 주세요"}
+              {isConnecting
+                ? "블루투스 페어링 팝업이 나타나면 '확인'을 눌러주세요"
+                : isScanning
+                  ? "기기의 전원이 켜져 있는지 확인해 주세요"
+                  : devices.length > 0
+                    ? "연결할 기기를 선택하세요"
+                    : "기기를 켜고 재스캔을 시도해 주세요"}
             </Text>
           </View>
 
-          {isScanning ? (
+          {isConnecting ? (
+            <ActivityIndicator color={colors.tint} />
+          ) : isScanning ? (
             <View style={styles.timerWrap}>
               <Text
                 style={[
@@ -588,6 +607,7 @@ export default function DeviceSetupScreen() {
                     setIsConnecting(null);
                     return;
                   }
+                  await triggerPairing(conn, setupDevice);
                   const nonce = await receiveData(conn, setupDevice);
                   if (nonce == null) {
                     setIsConnecting(null);

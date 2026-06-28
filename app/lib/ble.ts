@@ -131,34 +131,41 @@ export const scanDevice = async (ioTDevice: IoTDevice, onDeviceFound?: (device: 
 };
 
 export const connectDevice = async (device: Device, tryCount: any = 0): Promise<Device | null> => {
-  return new Promise<Device | null>(async (resolve) => {
-    while (tryCount < 5) {
-      try {
-        // 1. 연결
-        logDebug({ event_name: event_name, log_type: "DEBUG", message: "연결 시도 중.." });
-        const connected = await device.connect();
-
-        // 2. MTU 조절
-        await connected.requestMTU(512);
-
-        // 3. 서비스/characteristic 탐색
-        await connected.discoverAllServicesAndCharacteristics();
-        logDebug({ event_name: event_name, log_type: "DEBUG", message: "서비스 탐색 중..." });
-
-        resolve(connected);
-        return;
-      } catch (e: any) {
-        tryCount++;
-        logDebug({ event_name: event_name, log_type: "DEBUG", message: "연결 실패" });
-        logDebug({
-          event_name: event_name,
-          log_type: "WARNING",
-          message: `실패 재시도(${tryCount}회): ${e.message}`,
-        });
-      }
+  let connected: Device | null = null;
+  while (tryCount < 5) {
+    try {
+      connected = await device.connect();
+      break;
+    } catch (e: any) {
+      tryCount++;
+      logDebug({ event_name, log_type: "WARNING", message: `실패 재시도(${tryCount}회): ${e.message}` });
     }
-    resolve(null);
-  });
+  }
+
+  if (!connected) return null;
+
+  await new Promise((r) => setTimeout(r, 600));
+
+  try { await connected.requestMTU(512); } catch {}
+
+  try {
+    await connected.discoverAllServicesAndCharacteristics();
+    return connected;
+  } catch (e: any) {
+    logDebug({ event_name, log_type: "WARNING", message: `서비스 탐색 실패: ${e.message}` });
+    return null;
+  }
+};
+
+// READ_ENC 특성 읽기 시도 → 암호화 미설정이면 Android이 페어링 시작 (팝업 1개)
+export const triggerPairing = async (device: Device, ioTDevice: IoTDevice): Promise<void> => {
+  const { ble_service_uuid, ble_read_uuid } = ioTDevice.ble_uuids;
+  if (!ble_service_uuid || !ble_read_uuid) return;
+  try {
+    await device.readCharacteristicForService(ble_service_uuid, ble_read_uuid);
+  } catch {
+    // 암호화 미설정 시 오류는 정상 — Android이 페어링을 시작함
+  }
 };
 
 // 기기 선택 시 GATT 임시 연결 + 키 교환

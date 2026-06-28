@@ -1,4 +1,5 @@
 #include "device_config.h"
+#include "ble_server.h"
 #include "app_config.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -206,6 +207,7 @@ void device_config_factory_reset(void)
         nvs_commit(h);
         nvs_close(h);
     }
+    ble_server_clear_bonds();
     ESP_LOGI(TAG, "Factory reset – rebooting");
     esp_restart();
 }

@@ -38,6 +38,7 @@ static char     s_current_otp[7] = "";         // 6-hex-char OTP + NUL
 static esp_timer_handle_t s_auth_timer = NULL;
 static bool s_adv_enabled  = false;            // normal mode: init 완료 후 true
 static bool s_setup_mode   = false;            // setup 모드 여부
+static bool s_encrypted    = false;            // 현재 연결 암호화 여부
 
 // ── UUID storage (populated at runtime from g_cfg) ────────────────────────────
 static ble_uuid128_t s_svc_uuid;
@@ -279,6 +280,11 @@ void ble_server_disconnect(void)
 {
     if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE)
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+}
+
+void ble_server_clear_bonds(void)
+{
+    ble_store_clear();
 }
 
 // ── Connect task: generate OTP, wait 3 s, then notify ────────────────────────
@@ -639,12 +645,12 @@ static const struct ble_gatt_svc_def s_setup_gatt_svcs[] = {
                 .uuid       = &s_setup_read_uuid.u,
                 .access_cb  = setup_chr_notify_access,
                 .val_handle = &s_setup_notify_handle,
-                .flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                .flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_NOTIFY,
             },
             {
                 .uuid      = &s_setup_write_uuid.u,
                 .access_cb = setup_chr_write_access,
-                .flags     = BLE_GATT_CHR_F_WRITE,
+                .flags     = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC,
             },
             { 0 },
         },
@@ -661,13 +667,9 @@ static int setup_gap_event_handler(struct ble_gap_event *event, void *arg)
                 ESP_LOGI(TAG, "Setup: app connected (handle %d)",
                          event->connect.conn_handle);
                 s_conn_handle = event->connect.conn_handle;
-                led_ble_connected();  // solid blue while connected
-                // 이전 태스크/큐 잔재가 있으면 정리 후 새로 시작
-                if (s_setup_task) { vTaskDelete(s_setup_task); s_setup_task = NULL; }
-                if (s_setup_queue) { vQueueDelete(s_setup_queue); s_setup_queue = NULL; }
-                s_setup_queue = xQueueCreate(4, sizeof(setup_msg_t));
-                xTaskCreate(setup_flow_task, "setup_flow", 8192,
-                            NULL, 5, &s_setup_task);
+                s_encrypted = false;
+                led_ble_connected();
+                // 앱이 READ_ENC 특성 읽기 시도 → Android이 페어링 개시 (팝업 1개)
             } else {
                 setup_ble_advertise();
             }
@@ -677,12 +679,34 @@ static int setup_gap_event_handler(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "Setup: app disconnected (reason %d)",
                      event->disconnect.reason);
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-            led_idle_blink_start();  // back to blue blink while waiting
-            // 태스크가 먼저 정리했으면 NULL, 앱이 먼저 끊으면 여기서 kill
+            s_encrypted = false;
+            led_idle_blink_start();
             if (s_setup_task) { vTaskDelete(s_setup_task); s_setup_task = NULL; }
             if (s_setup_queue) { vQueueDelete(s_setup_queue); s_setup_queue = NULL; }
             setup_ble_advertise();
             break;
+
+        case BLE_GAP_EVENT_ENC_CHANGE:
+            ESP_LOGI(TAG, "Setup: encryption changed (status=%d)", event->enc_change.status);
+            if (event->enc_change.status == 0) {
+                s_encrypted = true;
+                s_setup_queue = xQueueCreate(4, sizeof(setup_msg_t));
+                xTaskCreate(setup_flow_task, "setup_flow", 8192,
+                            NULL, 5, &s_setup_task);
+            } else {
+                ESP_LOGW(TAG, "Setup: encryption failed – disconnecting");
+                ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            }
+            break;
+
+        case BLE_GAP_EVENT_REPEAT_PAIRING:
+        {
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+                ble_store_util_delete_peer(&desc.peer_id_addr);
+            }
+            return BLE_GAP_REPEAT_PAIRING_RETRY;
+        }
 
         case BLE_GAP_EVENT_ADV_COMPLETE:
             setup_ble_advertise();
@@ -726,6 +750,13 @@ void ble_setup_server_init(void)
     parse_uuid128(SETUP_WRITE_UUID,   &s_setup_write_uuid);
 
     ESP_ERROR_CHECK(nimble_port_init());
+
+    ble_hs_cfg.sm_io_cap         = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.sm_bonding        = 1;
+    ble_hs_cfg.sm_mitm           = 0;
+    ble_hs_cfg.sm_sc             = 1;
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
     ble_hs_cfg.sync_cb  = on_ble_sync;
     ble_hs_cfg.reset_cb = on_ble_reset;
