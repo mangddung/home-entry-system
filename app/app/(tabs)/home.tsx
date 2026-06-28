@@ -1,13 +1,12 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { verifyToken } from "@/lib/api/auth";
-import { fetchDevices, fetchUnconfiguredDevices } from "@/lib/api/devices";
+import { fetchDevices, fetchUnconfiguredDevices, loadDevices } from "@/lib/api/devices";
 import { loadFcmNotifications, getFcmLastReadAt, setFcmLastReadAt, type FcmNotificationItem } from "@/lib/fcm-log";
 import {
   IS_ONLINE_KEY,
   SELECTED_DEVICE_KEY,
   UNFIGURED_DEVICES_KEY,
-  USER_DEVICES_KEY,
 } from "@/lib/constants";
 import { checkAuthToken, getTokenSecure, setTokenSecure } from "@/lib/token-storage";
 import { IoTDevice } from "@/lib/types";
@@ -75,6 +74,12 @@ export default function HomeScreen() {
 
   useEffect(() => {
     if (!isFocused) return;
+
+    const refreshDevices = async () => {
+      await fetchDevices();
+      setUserDevices(await loadDevices());
+    };
+
     void (async () => {
       const initializeTf = await checkAuthToken();
       if (!initializeTf) {
@@ -99,9 +104,7 @@ export default function HomeScreen() {
       setUnreadCount(notifs.filter(n => new Date(n.timestamp) > readAt).length);
       const isOnlineNow = result.type === "success";
       if (isOnlineNow) {
-        await fetchDevices();
-        const temp = await getTokenSecure(USER_DEVICES_KEY);
-        if (temp) setUserDevices(JSON.parse(temp) as IoTDevice[]);
+        await refreshDevices();
         await fetchUnconfiguredDevices();
         const unfigured = await getTokenSecure(UNFIGURED_DEVICES_KEY);
         if (unfigured) {
@@ -111,6 +114,9 @@ export default function HomeScreen() {
         }
       }
     })();
+
+    const interval = setInterval(() => { void refreshDevices(); }, 30_000);
+    return () => clearInterval(interval);
   }, [isFocused]);
 
   const cardBg = isDark ? "#1e2022" : "#f3f4f6";

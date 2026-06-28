@@ -1,6 +1,6 @@
-import { fetchDevices } from "@/lib/api/devices";
+import { fetchDevices, loadDevices } from "@/lib/api/devices";
 import { userTokenExchange } from "@/lib/ble";
-import { DEBUG_LOG, USER_DEVICES_KEY } from "@/lib/constants";
+import { DEBUG_LOG } from "@/lib/constants";
 import { getTokenSecure } from "@/lib/token-storage";
 import type { DebugLog, IoTDevice } from "@/lib/types";
 import { Button, Provider, Text } from "@ant-design/react-native";
@@ -85,8 +85,7 @@ export default function DKeySettingScreen() {
       if (result.type !== "success") {
         setError(result.message);
       }
-      const stored = await getTokenSecure(USER_DEVICES_KEY);
-      if (stored) setDevices(JSON.parse(stored));
+      setDevices(await loadDevices());
     })();
   }, []);
 

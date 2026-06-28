@@ -4,6 +4,7 @@ export const USER_REFRESH_TOKEN_KEY = "user-refresh-token-key";
 export const USER_NAME_KEY = "user-name";
 export const USER_UUID_KEY = "user-uuid";
 export const USER_DEVICES_KEY = "user-devices";
+export const DEVICE_KEY_PREFIX = "device-";
 export const DEVICE_SETUP_KEY = "device-setup";
 
 export const DEBUG_LOG = "debug-log";

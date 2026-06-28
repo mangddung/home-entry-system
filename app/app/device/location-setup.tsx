@@ -1,7 +1,7 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
-import { fetchDeviceLocation } from "@/lib/api/devices";
-import { UNFIGURED_DEVICES_KEY, USER_DEVICES_KEY } from "@/lib/constants";
+import { fetchDeviceLocation, loadDevices } from "@/lib/api/devices";
+import { UNFIGURED_DEVICES_KEY } from "@/lib/constants";
 import { getTokenSecure } from "@/lib/token-storage";
 import type { IoTDevice } from "@/lib/types";
 import { Toast } from "@ant-design/react-native";
@@ -333,11 +333,8 @@ export default function LocationSetupScreen() {
 
   useEffect(() => {
     void (async () => {
-      const stored = await getTokenSecure(USER_DEVICES_KEY);
-      if (stored) {
-        const devices: IoTDevice[] = JSON.parse(stored);
-        existingDevicesRef.current = devices.filter((d) => d.location);
-      }
+      const devices = await loadDevices();
+      existingDevicesRef.current = devices.filter((d) => d.location);
     })();
   }, []);
 

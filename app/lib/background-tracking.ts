@@ -4,11 +4,11 @@
 
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
+import { loadDevices } from "./api/devices";
 import {
   BG_LOCATION_TASK,
   CURRENT_LOCATION_KEY,
   DEVICE_STATUS_KEY,
-  USER_DEVICES_KEY,
 } from "./constants";
 import { appendSystemLog } from "./system-log";
 import { getTokenSecure, setTokenSecure } from "./token-storage";
@@ -32,8 +32,7 @@ const getDistancem = (lat1: number, lon1: number, lat2: number, lon2: number) =>
 };
 
 export const updateDeviceStatus = async (location: Location) => {
-  const storedData: string | null = await getTokenSecure(USER_DEVICES_KEY);
-  const devices: IoTDevice[] = storedData ? JSON.parse(storedData) : [];
+  const devices: IoTDevice[] = await loadDevices();
   const validDevices = devices.filter(
     (device) =>
       device.location &&

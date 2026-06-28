@@ -2,6 +2,7 @@ import axios from "axios";
 import { router } from "expo-router";
 import {
   BACKEND_URL,
+  DEVICE_KEY_PREFIX,
   DEVICE_SETUP_KEY,
   DEVICE_STATUS_KEY,
   UNFIGURED_DEVICES_KEY,
@@ -23,7 +24,13 @@ export const fetchDevices = async () => {
       headers: { Authorization: `Bearer ${access_token}` },
     });
     const devices: IoTDevice[] = response.data.data;
-    await setTokenSecure(USER_DEVICES_KEY, JSON.stringify(devices));
+    // UUID 인덱스만 USER_DEVICES_KEY에 저장 (2KB 제한 대응)
+    const uuids = devices.map((d) => d.device_uuid);
+    await setTokenSecure(USER_DEVICES_KEY, JSON.stringify(uuids));
+    // 기기별 전체 데이터를 개별 키에 저장
+    await Promise.all(
+      devices.map((d) => setTokenSecure(`${DEVICE_KEY_PREFIX}${d.device_uuid}`, JSON.stringify(d)))
+    );
 
     // device status 업데이트
     const storedDeviceStatus: string | null = await getTokenSecure(DEVICE_STATUS_KEY);
@@ -53,6 +60,41 @@ export const fetchDevices = async () => {
   } catch (error) {
     return { type: "error", message: getApiErrorMessage(error) };
   }
+};
+
+export const loadDevices = async (): Promise<IoTDevice[]> => {
+  const index = await getTokenSecure(USER_DEVICES_KEY);
+  if (!index) return [];
+  let uuids: string[];
+  try {
+    const parsed = JSON.parse(index);
+    // 마이그레이션: 기존 형식(IoTDevice 배열)이 남아있으면 빈 배열 반환 (다음 fetchDevices()에서 재기록)
+    if (!Array.isArray(parsed) || (parsed.length > 0 && typeof parsed[0] !== "string")) return [];
+    uuids = parsed;
+  } catch {
+    return [];
+  }
+  const results = await Promise.all(
+    uuids.map(async (uuid) => {
+      const raw = await getTokenSecure(`${DEVICE_KEY_PREFIX}${uuid}`);
+      if (!raw) return null;
+      try { return JSON.parse(raw) as IoTDevice; } catch { return null; }
+    })
+  );
+  return results.filter((d): d is IoTDevice => d !== null);
+};
+
+export const clearDeviceStorage = async () => {
+  const index = await getTokenSecure(USER_DEVICES_KEY);
+  if (index) {
+    try {
+      const parsed = JSON.parse(index);
+      if (Array.isArray(parsed) && (parsed.length === 0 || typeof parsed[0] === "string")) {
+        await Promise.all((parsed as string[]).map((uuid) => setTokenSecure(`${DEVICE_KEY_PREFIX}${uuid}`, "")));
+      }
+    } catch {}
+  }
+  await setTokenSecure(USER_DEVICES_KEY, "");
 };
 
 export const fetchSetupUuid = async () => {

@@ -1,11 +1,11 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
-import { CURRENT_LOCATION_KEY, USER_DEVICES_KEY } from "@/lib/constants";
+import { loadDevices } from "@/lib/api/devices";
+import { CURRENT_LOCATION_KEY } from "@/lib/constants";
 import { readLogs } from "@/lib/system-log";
 import { getTokenSecure } from "@/lib/token-storage";
 import { LocationObject } from "expo-location";
 import { useFocusEffect } from "expo-router";
-import * as SecureStore from "expo-secure-store";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { WebView } from "react-native-webview";
@@ -210,9 +210,7 @@ export default function MapScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      SecureStore.getItemAsync(USER_DEVICES_KEY).then((stored) => {
-        if (stored) setDevices(JSON.parse(stored));
-      });
+      void loadDevices().then(setDevices);
     }, []),
   );
 

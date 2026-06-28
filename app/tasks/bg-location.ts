@@ -1,10 +1,10 @@
 import { updateDeviceStatus } from "@/lib/background-tracking";
 import { userTokenExchange } from "@/lib/ble";
+import { loadDevices } from "@/lib/api/devices";
 import {
   BG_LOCATION_TASK,
   CURRENT_LOCATION_KEY,
   DEVICE_STATUS_KEY,
-  USER_DEVICES_KEY,
 } from "@/lib/constants";
 import { appendLog, appendSystemLog } from "@/lib/system-log";
 import { getTokenSecure, setTokenSecure } from "@/lib/token-storage";
@@ -41,8 +41,7 @@ TaskManager.defineTask(BG_LOCATION_TASK, async ({ data, error }) => {
       if (enteredDevices.length === 0) continue;
 
       // devices 로드
-      const storedData: string | null = await getTokenSecure(USER_DEVICES_KEY);
-      const devices: IoTDevice[] = storedData ? JSON.parse(storedData) : [];
+      const devices: IoTDevice[] = await loadDevices();
 
       const bleTargetDevices = devices.filter((d) => {
         if (!enteredDevicesUuid.has(d.device_uuid)) return false;

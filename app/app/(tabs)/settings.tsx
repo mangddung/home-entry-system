@@ -1,7 +1,8 @@
 import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
 import { refreshToken } from "@/lib/api/auth";
+import { clearDeviceStorage } from "@/lib/api/devices";
 import { revokeFcmToken } from "@/lib/api/fcm";
-import { BG_LOCATION_TASK, CURRENT_LOCATION_KEY, DEVICE_STATUS_KEY, IS_ONLINE_KEY, SELECTED_DEVICE_KEY, UNFIGURED_DEVICES_KEY, USER_ACCESS_TOKEN_KEY, USER_DEVICES_KEY, USER_NAME_KEY, USER_REFRESH_TOKEN_KEY, USER_SECRET_KEY, USER_UUID_KEY } from "@/lib/constants";
+import { BG_LOCATION_TASK, CURRENT_LOCATION_KEY, DEVICE_STATUS_KEY, IS_ONLINE_KEY, SELECTED_DEVICE_KEY, UNFIGURED_DEVICES_KEY, USER_ACCESS_TOKEN_KEY, USER_NAME_KEY, USER_REFRESH_TOKEN_KEY, USER_SECRET_KEY, USER_UUID_KEY } from "@/lib/constants";
 import { setTokenSecure } from "@/lib/token-storage";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
@@ -88,7 +89,7 @@ export default function SettingsScreen() {
           await setTokenSecure(USER_UUID_KEY, "");
           await setTokenSecure(USER_ACCESS_TOKEN_KEY, "");
           await setTokenSecure(USER_REFRESH_TOKEN_KEY, "");
-          await setTokenSecure(USER_DEVICES_KEY, "");
+          await clearDeviceStorage();
           await setTokenSecure(UNFIGURED_DEVICES_KEY, "");
           await setTokenSecure(SELECTED_DEVICE_KEY, "");
           await setTokenSecure(IS_ONLINE_KEY, "");

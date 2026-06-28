@@ -10,7 +10,6 @@ import {
   SELECTED_DEVICE_KEY,
   UNFIGURED_DEVICES_KEY,
   USER_ACCESS_TOKEN_KEY,
-  USER_DEVICES_KEY,
   USER_NAME_KEY,
   USER_REFRESH_TOKEN_KEY,
   USER_SECRET_KEY,
@@ -18,6 +17,7 @@ import {
 } from "../constants";
 import { triggerSessionAlert } from "../session-alert";
 import { setTokenSecure } from "../token-storage";
+import { clearDeviceStorage } from "./devices";
 
 async function clearSession() {
   await Promise.all([
@@ -26,7 +26,7 @@ async function clearSession() {
     setTokenSecure(USER_UUID_KEY, ""),
     setTokenSecure(USER_ACCESS_TOKEN_KEY, ""),
     setTokenSecure(USER_REFRESH_TOKEN_KEY, ""),
-    setTokenSecure(USER_DEVICES_KEY, ""),
+    clearDeviceStorage(),
     setTokenSecure(UNFIGURED_DEVICES_KEY, ""),
     setTokenSecure(SELECTED_DEVICE_KEY, ""),
     setTokenSecure(IS_ONLINE_KEY, ""),
