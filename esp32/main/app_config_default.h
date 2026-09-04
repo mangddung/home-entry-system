@@ -19,6 +19,7 @@
 #define SETUP_WIFI_TIMEOUT_MS   20000          // WiFi 연결 대기 타임아웃 (20s)
 #define SETUP_CRED_TIMEOUT_MS   (3 * 60 * 1000) // 자격증명 대기 (3분)
 #define SETUP_MAX_RETRIES       3
+#define SETUP_ADV_TIMEOUT_MS    (5 * 60 * 1000) // 미연결 시 advertise 중단까지 대기 (5분)
 
 // Setup service UUIDs (fixed, used for initial provisioning)
 #define SETUP_SERVICE_UUID "26e9d5e3-cf2d-42fd-90df-8b0cc3082984"

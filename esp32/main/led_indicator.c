@@ -157,3 +157,9 @@ void led_reset_ok(void)
     s_gen++;
     led_set_color(0, 77, 0);  // solid green
 }
+
+void led_setup_timeout(void)
+{
+    s_gen++;
+    led_set_color(77, 20, 0);  // solid orange
+}

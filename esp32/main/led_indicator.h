@@ -22,3 +22,6 @@ void led_wifi_connecting(void);    // yellow 0.5 s blink indefinitely
 
 // Reset flow helpers (called before factory reset – no need to clean up)
 void led_reset_ok(void);           // stop blink, solid green (reset proceeds)
+
+// Setup advertise timeout (no pairing within SETUP_ADV_TIMEOUT_MS)
+void led_setup_timeout(void);      // stop blink, solid orange (power-save wait)

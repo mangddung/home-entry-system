@@ -56,6 +56,8 @@ static ble_uuid128_t    s_setup_svc_uuid;
 static ble_uuid128_t    s_setup_read_uuid;
 static ble_uuid128_t    s_setup_write_uuid;
 static uint16_t         s_setup_notify_handle;
+static esp_timer_handle_t s_setup_timeout_timer = NULL;
+static bool              s_setup_timed_out = false;  // SETUP_ADV_TIMEOUT_MS 동안 미연결
 
 // Setup WiFi
 static EventGroupHandle_t s_setup_wifi_eg = NULL;
@@ -658,6 +660,16 @@ static const struct ble_gatt_svc_def s_setup_gatt_svcs[] = {
     { 0 },
 };
 
+// ── Setup advertise timeout (5분 미연결 시 절전) ────────────────────────────────
+static void setup_adv_timeout_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGW(TAG, "Setup: %dms 동안 미연결 – advertise 중단, 절전 대기", SETUP_ADV_TIMEOUT_MS);
+    s_setup_timed_out = true;
+    ble_gap_adv_stop();
+    led_setup_timeout();
+}
+
 // ── Setup GAP event handler ───────────────────────────────────────────────────
 static int setup_gap_event_handler(struct ble_gap_event *event, void *arg)
 {
@@ -668,6 +680,7 @@ static int setup_gap_event_handler(struct ble_gap_event *event, void *arg)
                          event->connect.conn_handle);
                 s_conn_handle = event->connect.conn_handle;
                 s_encrypted = false;
+                if (s_setup_timeout_timer) esp_timer_stop(s_setup_timeout_timer);
                 led_ble_connected();
                 // 앱이 READ_ENC 특성 읽기 시도 → Android이 페어링 개시 (팝업 1개)
             } else {
@@ -721,6 +734,8 @@ static int setup_gap_event_handler(struct ble_gap_event *event, void *arg)
 // ── Setup advertising (continuous) ───────────────────────────────────────────
 static void setup_ble_advertise(void)
 {
+    if (s_setup_timed_out) return;  // 5분 미연결 – advertise 재개 안 함
+
     struct ble_gap_adv_params params = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
@@ -769,5 +784,13 @@ void ble_setup_server_init(void)
     ESP_ERROR_CHECK(ble_gatts_add_svcs(s_setup_gatt_svcs));
 
     nimble_port_freertos_init(ble_host_task);
+
+    const esp_timer_create_args_t timeout_args = {
+        .callback = setup_adv_timeout_cb,
+        .name     = "setup_adv_timeout",
+    };
+    esp_timer_create(&timeout_args, &s_setup_timeout_timer);
+    esp_timer_start_once(s_setup_timeout_timer, (uint64_t)SETUP_ADV_TIMEOUT_MS * 1000);
+
     ESP_LOGI(TAG, "BLE setup server initialized");
 }
