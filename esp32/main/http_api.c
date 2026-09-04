@@ -108,6 +108,13 @@ static void apply_init_response(const char *json)
         device_config_set_token(token->valuestring);
     }
 
+    // Refresh token update (defensive – /iot/init doesn't currently reissue tokens)
+    cJSON *refresh = cJSON_GetObjectItemCaseSensitive(root, "refresh_token");
+    if (cJSON_IsString(refresh) && refresh->valuestring[0] != '\0' &&
+        strcmp(refresh->valuestring, g_cfg.refresh_token) != 0) {
+        device_config_set_refresh_token(refresh->valuestring);
+    }
+
     // BLE UUID update (reboot) — only if all 4 fields are present
     cJSON *svc  = cJSON_GetObjectItemCaseSensitive(root, "ble_service_uuid");
     cJSON *read = cJSON_GetObjectItemCaseSensitive(root, "ble_read_uuid");
@@ -131,6 +138,57 @@ static void apply_init_response(const char *json)
     cJSON_Delete(root);
 }
 
+// ── Reauthentication fallback chain ────────────────────────────────────────────
+// Parses {"data":{"access_token":..., "refresh_token":...}} and applies both.
+static bool apply_auth_response(const char *json)
+{
+    cJSON *root = cJSON_Parse(json);
+    if (!root) return false;
+
+    cJSON *data    = cJSON_GetObjectItemCaseSensitive(root, "data");
+    cJSON *access  = data ? cJSON_GetObjectItemCaseSensitive(data, "access_token")  : NULL;
+    cJSON *refresh = data ? cJSON_GetObjectItemCaseSensitive(data, "refresh_token") : NULL;
+
+    bool ok = cJSON_IsString(access) && access->valuestring[0] != '\0' &&
+              cJSON_IsString(refresh) && refresh->valuestring[0] != '\0';
+    if (ok) {
+        device_config_set_token(access->valuestring);
+        device_config_set_refresh_token(refresh->valuestring);
+    }
+
+    cJSON_Delete(root);
+    return ok;
+}
+
+// On 401: try stored refresh_token via /iot/refresh, then fall back to
+// device_uuid + secret_key via /iot/reauth. Updates g_cfg + NVS on success.
+static bool device_reauthenticate(void)
+{
+    char resp_body[512];
+
+    if (g_cfg.refresh_token[0] != '\0') {
+        char body[CFG_REFRESH_LEN + 32];
+        snprintf(body, sizeof(body), "{\"refresh_token\":\"%s\"}", g_cfg.refresh_token);
+        int status = do_post_with_body(HA_REFRESH_URL, body, resp_body, sizeof(resp_body));
+        if (status == 200 && apply_auth_response(resp_body)) {
+            ESP_LOGI(TAG, "reauth: /iot/refresh succeeded");
+            return true;
+        }
+        ESP_LOGW(TAG, "reauth: /iot/refresh failed (HTTP %d)", status);
+    }
+
+    char body[256];
+    snprintf(body, sizeof(body), "{\"device_uuid\":\"%s\",\"secret_key\":\"%s\"}",
+             IOT_DEVICE_UUID, IOT_DEVICE_SECRET_KEY);
+    int status = do_post_with_body(HA_REAUTH_URL, body, resp_body, sizeof(resp_body));
+    if (status == 200 && apply_auth_response(resp_body)) {
+        ESP_LOGI(TAG, "reauth: /iot/reauth succeeded");
+        return true;
+    }
+    ESP_LOGW(TAG, "reauth: /iot/reauth failed (HTTP %d)", status);
+    return false;
+}
+
 // ── Tasks ─────────────────────────────────────────────────────────────────────
 
 static void task_iot_init(void *arg)
@@ -152,31 +210,43 @@ static void task_iot_init(void *arg)
         g_cfg.manufacturer_uuid);
 
     char resp_body[512] = {0};
-    resp_buf_t rb = { .buf = resp_body, .size = sizeof(resp_body), .len = 0 };
-
-    esp_http_client_config_t cfg = {
-        .url                   = HA_INIT_URL,
-        .method                = HTTP_METHOD_POST,
-        .timeout_ms            = HTTP_TIMEOUT_MS,
-        .disable_auto_redirect = true,
-        .event_handler         = http_event_cb,
-        .user_data             = &rb,
-        .buffer_size_tx        = CFG_TOKEN_LEN + 256,
-        .crt_bundle_attach     = esp_crt_bundle_attach,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    esp_http_client_set_header(client, "Content-Type",  "application/json");
-    esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
-    esp_http_client_set_header(client, "Authorization", auth_header);
-    esp_http_client_set_post_field(client, body, (int)strlen(body));
-
-    esp_err_t err = esp_http_client_perform(client);
     int status = 0;
-    if (err == ESP_OK) status = esp_http_client_get_status_code(client);
-    else ESP_LOGE(TAG, "HTTP error: %s", esp_err_to_name(err));
-    esp_http_client_cleanup(client);
 
-    char *resp = rb.buf;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        resp_body[0] = '\0';
+        resp_buf_t rb = { .buf = resp_body, .size = sizeof(resp_body), .len = 0 };
+
+        esp_http_client_config_t cfg = {
+            .url                   = HA_INIT_URL,
+            .method                = HTTP_METHOD_POST,
+            .timeout_ms            = HTTP_TIMEOUT_MS,
+            .disable_auto_redirect = true,
+            .event_handler         = http_event_cb,
+            .user_data             = &rb,
+            .buffer_size_tx        = CFG_TOKEN_LEN + 256,
+            .crt_bundle_attach     = esp_crt_bundle_attach,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        esp_http_client_set_header(client, "Content-Type",  "application/json");
+        esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
+        esp_http_client_set_header(client, "Authorization", auth_header);
+        esp_http_client_set_post_field(client, body, (int)strlen(body));
+
+        esp_err_t err = esp_http_client_perform(client);
+        status = 0;
+        if (err == ESP_OK) status = esp_http_client_get_status_code(client);
+        else ESP_LOGE(TAG, "HTTP error: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+
+        if (status == 401 && attempt == 0 && device_reauthenticate()) {
+            ESP_LOGI(TAG, "IoT init: retrying after reauth");
+            snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_cfg.device_token);
+            continue;
+        }
+        break;
+    }
+
+    char *resp = resp_body;
     switch (status) {
         case 200:
             ESP_LOGI(TAG, "IoT init OK");
@@ -240,27 +310,37 @@ static void task_validate_token(void *arg)
     }
 
     char auth_header[CFG_TOKEN_LEN + 8];
-    snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_cfg.device_token);
-
-    esp_http_client_config_t cfg = {
-        .url                   = HA_VALIDATE_URL,
-        .method                = HTTP_METHOD_POST,
-        .timeout_ms            = HTTP_TIMEOUT_MS,
-        .disable_auto_redirect = true,
-        .buffer_size_tx        = CFG_TOKEN_LEN + 256,
-        .crt_bundle_attach     = esp_crt_bundle_attach,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    esp_http_client_set_header(client, "Content-Type",  "application/json");
-    esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
-    esp_http_client_set_header(client, "Authorization", auth_header);
-    esp_http_client_set_post_field(client, body, (int)strlen(body));
-
-    esp_err_t err = esp_http_client_perform(client);
     int status = 0;
-    if (err == ESP_OK) status = esp_http_client_get_status_code(client);
-    else ESP_LOGE(TAG, "HTTP error: %s", esp_err_to_name(err));
-    esp_http_client_cleanup(client);
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_cfg.device_token);
+
+        esp_http_client_config_t cfg = {
+            .url                   = HA_VALIDATE_URL,
+            .method                = HTTP_METHOD_POST,
+            .timeout_ms            = HTTP_TIMEOUT_MS,
+            .disable_auto_redirect = true,
+            .buffer_size_tx        = CFG_TOKEN_LEN + 256,
+            .crt_bundle_attach     = esp_crt_bundle_attach,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        esp_http_client_set_header(client, "Content-Type",  "application/json");
+        esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
+        esp_http_client_set_header(client, "Authorization", auth_header);
+        esp_http_client_set_post_field(client, body, (int)strlen(body));
+
+        esp_err_t err = esp_http_client_perform(client);
+        status = 0;
+        if (err == ESP_OK) status = esp_http_client_get_status_code(client);
+        else ESP_LOGE(TAG, "HTTP error: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+
+        if (status == 401 && attempt == 0 && device_reauthenticate()) {
+            ESP_LOGI(TAG, "Token validation: retrying after reauth");
+            continue;
+        }
+        break;
+    }
     free(body);
 
     switch (status) {
@@ -294,27 +374,37 @@ static void task_ping(void *arg)
 {
     for (;;) {
         char auth_header[CFG_TOKEN_LEN + 8];
-        snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_cfg.device_token);
-
-        esp_http_client_config_t cfg = {
-            .url                   = HA_PING_URL,
-            .method                = HTTP_METHOD_POST,
-            .timeout_ms            = HTTP_TIMEOUT_MS,
-            .disable_auto_redirect = true,
-            .buffer_size_tx        = CFG_TOKEN_LEN + 256,
-            .crt_bundle_attach     = esp_crt_bundle_attach,
-        };
-        esp_http_client_handle_t client = esp_http_client_init(&cfg);
-        esp_http_client_set_header(client, "Content-Type",  "application/json");
-        esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
-        esp_http_client_set_header(client, "Authorization", auth_header);
-        esp_http_client_set_post_field(client, "{}", 2);
-
-        esp_err_t err = esp_http_client_perform(client);
         int status = 0;
-        if (err == ESP_OK) status = esp_http_client_get_status_code(client);
-        else ESP_LOGE(TAG, "Ping failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
+
+        for (int attempt = 0; attempt < 2; attempt++) {
+            snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_cfg.device_token);
+
+            esp_http_client_config_t cfg = {
+                .url                   = HA_PING_URL,
+                .method                = HTTP_METHOD_POST,
+                .timeout_ms            = HTTP_TIMEOUT_MS,
+                .disable_auto_redirect = true,
+                .buffer_size_tx        = CFG_TOKEN_LEN + 256,
+                .crt_bundle_attach     = esp_crt_bundle_attach,
+            };
+            esp_http_client_handle_t client = esp_http_client_init(&cfg);
+            esp_http_client_set_header(client, "Content-Type",  "application/json");
+            esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
+            esp_http_client_set_header(client, "Authorization", auth_header);
+            esp_http_client_set_post_field(client, "{}", 2);
+
+            esp_err_t err = esp_http_client_perform(client);
+            status = 0;
+            if (err == ESP_OK) status = esp_http_client_get_status_code(client);
+            else ESP_LOGE(TAG, "Ping failed: %s", esp_err_to_name(err));
+            esp_http_client_cleanup(client);
+
+            if (status == 401 && attempt == 0 && device_reauthenticate()) {
+                ESP_LOGI(TAG, "Ping: retrying after reauth");
+                continue;
+            }
+            break;
+        }
 
         TickType_t delay_ms;
         if (status == 200) {

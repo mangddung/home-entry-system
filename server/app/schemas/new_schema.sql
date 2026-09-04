@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS device_management (
     ble_service_uuid VARCHAR(255) NOT NULL UNIQUE,
     ble_write_uuid VARCHAR(255) NOT NULL UNIQUE,
     ble_read_uuid VARCHAR(255) NOT NULL UNIQUE,
-    ble_manufacturer_uuid VARCHAR(255) UNIQUE
+    ble_manufacturer_uuid VARCHAR(255) UNIQUE,
+    current_jti VARCHAR(36)
 );
 
 -- 4. Settings Management Table
@@ -89,7 +90,17 @@ CREATE TABLE IF NOT EXISTS token_blacklist (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 9. Kakao OAuth Token Table
+-- 9. Device Refresh Token Table
+CREATE TABLE IF NOT EXISTS device_refresh_tokens (
+    token_value VARCHAR(255) PRIMARY KEY,
+    device_uuid VARCHAR(50) NOT NULL,
+    expired_at  DATETIME NOT NULL,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (device_uuid) REFERENCES device_management(device_uuid) ON DELETE CASCADE
+);
+
+-- 10. Kakao OAuth Token Table
 CREATE TABLE IF NOT EXISTS kakao_oauth_tokens (
     id             INT AUTO_INCREMENT PRIMARY KEY,
     user_uuid      VARCHAR(50) NOT NULL,

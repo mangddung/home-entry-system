@@ -114,6 +114,14 @@ void device_config_load(void)
                 sizeof(g_cfg.device_token));
     }
 
+    // Refresh token: NVS → empty
+    if (has_nvs) {
+        load_str(h, "refresh_token", g_cfg.refresh_token,
+                 sizeof(g_cfg.refresh_token), "");
+    } else {
+        g_cfg.refresh_token[0] = '\0';
+    }
+
     // Setup done flag
     uint8_t done = 0;
     if (has_nvs) nvs_get_u8(h, NVS_KEY_SETUP_DONE, &done);
@@ -163,6 +171,17 @@ void device_config_set_token(const char *token)
     nvs_close(h);
     strlcpy(g_cfg.device_token, token, sizeof(g_cfg.device_token));
     ESP_LOGI(TAG, "device token updated");
+}
+
+void device_config_set_refresh_token(const char *refresh_token)
+{
+    nvs_handle_t h;
+    ESP_ERROR_CHECK(nvs_open(NVS_NS, NVS_READWRITE, &h));
+    nvs_set_str(h, "refresh_token", refresh_token);
+    nvs_commit(h);
+    nvs_close(h);
+    strlcpy(g_cfg.refresh_token, refresh_token, sizeof(g_cfg.refresh_token));
+    ESP_LOGI(TAG, "refresh token updated");
 }
 
 void device_config_update_ble(const char *svc, const char *read,

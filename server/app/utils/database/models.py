@@ -69,12 +69,14 @@ class DeviceManagement(Base):
     ble_read_uuid         = Column(String(255), nullable=False, unique=True)
     ble_manufacturer_uuid = Column(String(255), nullable=True, unique=True)
     last_ping_at          = Column(DateTime, nullable=True)
+    current_jti           = Column(String(36), nullable=True)
 
     settings        = relationship("Settings", back_populates="device", cascade="all, delete-orphan")
     location        = relationship("DeviceLocation", back_populates="device", cascade="all, delete-orphan", uselist=False)
     invite_codes = relationship("InviteCode", back_populates="device", foreign_keys="InviteCode.device_uuid", cascade="all, delete-orphan")
     user_mappings   = relationship("UserDeviceMapping", back_populates="device", cascade="all, delete-orphan")
     user_tokens     = relationship("UserToken", back_populates="device", cascade="all, delete-orphan")
+    refresh_tokens  = relationship("DeviceRefreshToken", back_populates="device", cascade="all, delete-orphan")
 
 
 class Settings(Base):
@@ -124,6 +126,17 @@ class UserRefreshToken(Base):
     created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="refresh_tokens")
+
+
+class DeviceRefreshToken(Base):
+    __tablename__ = "device_refresh_tokens"
+
+    token_value = Column(String(255), primary_key=True)
+    device_uuid = Column(String(50), ForeignKey("device_management.device_uuid", ondelete="CASCADE"), nullable=False)
+    expired_at  = Column(DateTime, nullable=False)
+    created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    device = relationship("DeviceManagement", back_populates="refresh_tokens")
 
 
 class TokenBlacklist(Base):

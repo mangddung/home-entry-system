@@ -33,4 +33,10 @@ def init_db():
             conn.execute(text("ALTER TABLE users ADD COLUMN current_jti VARCHAR(36)"))
             conn.commit()
 
+    existing_device_cols = {c["name"] for c in inspector.get_columns("device_management")}
+    if "current_jti" not in existing_device_cols:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE device_management ADD COLUMN current_jti VARCHAR(36)"))
+            conn.commit()
+
     Session = sessionmaker(bind=engine)

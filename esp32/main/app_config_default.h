@@ -42,6 +42,8 @@
 #define HA_PING_URL           API_BASE_URL "/iot/ping"
 #define HA_VALIDATE_SETUP_URL API_BASE_URL "/iot/validate_setup"
 #define HA_RESET_URL          API_BASE_URL "/iot/reset"
+#define HA_REFRESH_URL        API_BASE_URL "/iot/refresh"
+#define HA_REAUTH_URL         API_BASE_URL "/iot/reauth"
 #define HTTP_TIMEOUT_MS 10000
 
 // ── Ping intervals ───────────────────────────────────────────────────────────

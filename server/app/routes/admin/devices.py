@@ -36,8 +36,9 @@ def register_device():
     ble_read_uuid         = str(uuid.uuid4())
     ble_manufacturer_uuid = str(uuid.uuid4())
     raw_secret_hex, enc_secret = _generate_device_secret()
+    device_jti = str(uuid.uuid4())
     device_token = _issue_device_jwt(
-        device_uuid, ble_service_uuid, ble_read_uuid, ble_write_uuid, ble_manufacturer_uuid
+        device_uuid, ble_service_uuid, ble_read_uuid, ble_write_uuid, ble_manufacturer_uuid, jti=device_jti
     )
     setup_token = secrets.token_urlsafe(32)
 
@@ -50,6 +51,7 @@ def register_device():
         ble_write_uuid        = ble_write_uuid,
         ble_read_uuid         = ble_read_uuid,
         ble_manufacturer_uuid = ble_manufacturer_uuid,
+        current_jti           = device_jti,
     )
 
     with _db.Session() as session:

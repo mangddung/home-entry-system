@@ -1,13 +1,15 @@
 #pragma once
 #include <stdbool.h>
 
-#define CFG_UUID_LEN   37   // 36 hex chars + NUL
-#define CFG_TOKEN_LEN  512  // JWT can be several hundred chars
-#define CFG_SSID_LEN   33   // 32 chars + NUL
-#define CFG_PW_LEN     65   // 64 chars + NUL
+#define CFG_UUID_LEN    37   // 36 hex chars + NUL
+#define CFG_TOKEN_LEN   512  // JWT can be several hundred chars
+#define CFG_REFRESH_LEN 96   // secrets.token_urlsafe(48) ~= 64 chars + headroom
+#define CFG_SSID_LEN    33   // 32 chars + NUL
+#define CFG_PW_LEN      65   // 64 chars + NUL
 
 typedef struct {
     char device_token[CFG_TOKEN_LEN];
+    char refresh_token[CFG_REFRESH_LEN];
     char ble_svc_uuid[CFG_UUID_LEN];
     char ble_chr_read_uuid[CFG_UUID_LEN];
     char ble_chr_write_uuid[CFG_UUID_LEN];
@@ -24,6 +26,9 @@ void device_config_load(void);
 
 // Update device token only (no reboot needed)
 void device_config_set_token(const char *token);
+
+// Update refresh token only (no reboot needed)
+void device_config_set_refresh_token(const char *refresh_token);
 
 // Update all BLE UUIDs and reboot to apply
 void device_config_update_ble(const char *svc, const char *read,
