@@ -1,7 +1,8 @@
 import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
 import { requestLocationPermissions } from "@/hooks/request-location-permit";
 import { verifyToken } from "@/lib/api/auth";
-import { setupBgLocation, startBgLocationTask } from "@/lib/background-tracking";
+import { updateGeoFence } from "@/lib/background-tracking";
+// import { setupBgLocation, startBgLocationTask } from "@/lib/background-tracking"; // GPS 폴링 방식 (geofence로 대체)
 import { IS_ONLINE_KEY } from "@/lib/constants";
 import { appendSystemLog } from "@/lib/system-log";
 import { checkAuthToken, setTokenSecure } from "@/lib/token-storage";
@@ -59,8 +60,9 @@ export default function IndexScreen() {
             if (b && g && bat && n) {
               setPermissionDenied(false);
               await checkAndSetAuth();
-              await setupBgLocation();
-              await startBgLocationTask();
+              // await setupBgLocation();
+              // await startBgLocationTask();
+              await updateGeoFence();
             } else {
               showPermissionBlocker(b, g, bat, n);
             }
@@ -105,8 +107,9 @@ export default function IndexScreen() {
       await checkAndSetAuth();
 
       // BG 태스크 시작
-      await setupBgLocation();
-      await startBgLocationTask();
+      // await setupBgLocation();
+      // await startBgLocationTask();
+      await updateGeoFence();
     })();
   }, []);
 

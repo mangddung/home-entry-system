@@ -2,6 +2,7 @@ import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { verifyToken } from "@/lib/api/auth";
 import { fetchDevices, fetchUnconfiguredDevices, loadDevices } from "@/lib/api/devices";
+import { updateGeoFence } from "@/lib/background-tracking";
 import { loadFcmNotifications, getFcmLastReadAt, setFcmLastReadAt, type FcmNotificationItem } from "@/lib/fcm-log";
 import {
   IS_ONLINE_KEY,
@@ -78,6 +79,7 @@ export default function HomeScreen() {
     const refreshDevices = async () => {
       await fetchDevices();
       setUserDevices(await loadDevices());
+      await updateGeoFence();
     };
 
     void (async () => {

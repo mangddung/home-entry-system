@@ -2,7 +2,7 @@ import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
 import { refreshToken } from "@/lib/api/auth";
 import { clearDeviceStorage } from "@/lib/api/devices";
 import { revokeFcmToken } from "@/lib/api/fcm";
-import { BG_LOCATION_TASK, CURRENT_LOCATION_KEY, DEVICE_STATUS_KEY, IS_ONLINE_KEY, SELECTED_DEVICE_KEY, UNFIGURED_DEVICES_KEY, USER_ACCESS_TOKEN_KEY, USER_NAME_KEY, USER_REFRESH_TOKEN_KEY, USER_SECRET_KEY, USER_UUID_KEY } from "@/lib/constants";
+import { BG_GEOFENCE_TASK, BG_LOCATION_TASK, CURRENT_LOCATION_KEY, DEVICE_STATUS_KEY, IS_ONLINE_KEY, SELECTED_DEVICE_KEY, UNFIGURED_DEVICES_KEY, USER_ACCESS_TOKEN_KEY, USER_NAME_KEY, USER_REFRESH_TOKEN_KEY, USER_SECRET_KEY, USER_UUID_KEY } from "@/lib/constants";
 import { setTokenSecure } from "@/lib/token-storage";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
@@ -99,6 +99,10 @@ export default function SettingsScreen() {
             const isRegistered = await TaskManager.isTaskRegisteredAsync(BG_LOCATION_TASK);
             if (isRegistered) {
               await Location.stopLocationUpdatesAsync(BG_LOCATION_TASK);
+            }
+            const isGeofenceRegistered = await TaskManager.isTaskRegisteredAsync(BG_GEOFENCE_TASK);
+            if (isGeofenceRegistered) {
+              await Location.stopGeofencingAsync(BG_GEOFENCE_TASK);
             }
           } catch {
             // ignore if task is not actually running

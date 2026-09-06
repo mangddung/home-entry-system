@@ -3,6 +3,7 @@ import * as Location from "expo-location";
 import { router } from "expo-router";
 import * as TaskManager from "expo-task-manager";
 import {
+  BG_GEOFENCE_TASK,
   BG_LOCATION_TASK,
   CURRENT_LOCATION_KEY,
   DEVICE_STATUS_KEY,
@@ -36,6 +37,8 @@ async function clearSession() {
   try {
     const isRegistered = await TaskManager.isTaskRegisteredAsync(BG_LOCATION_TASK);
     if (isRegistered) await Location.stopLocationUpdatesAsync(BG_LOCATION_TASK);
+    const isGeofenceRegistered = await TaskManager.isTaskRegisteredAsync(BG_GEOFENCE_TASK);
+    if (isGeofenceRegistered) await Location.stopGeofencingAsync(BG_GEOFENCE_TASK);
   } catch {}
 }
 
