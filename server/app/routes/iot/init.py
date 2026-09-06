@@ -9,7 +9,7 @@ import jwt
 from app.utils.database import database as _db
 from app.utils.database.models import DeviceManagement, User, UserDeviceMapping, UserToken, DeviceRefreshToken, TokenBlacklist
 from app.utils.crypto_utils import decrpyt_key, decrypt_data
-from app.utils.device_utils import _generate_device_secret, _issue_device_jwt, issue_device_token_pair
+from app.utils.device_utils import _generate_device_secret, _issue_device_jwt, issue_device_token_pair, check_device_limit
 from app.utils.log_utils import log_activity
 from app.utils.fcm_utils import send_to_device_master, send_to_user
 
@@ -242,6 +242,9 @@ def iot_validate_setup():
         user = session.query(User).filter_by(user_uuid=user_uuid).first()
         if user is None:
             return jsonify({"status": "error", "message": "User not found"}), 400
+
+        if not check_device_limit(session, user_uuid):
+            return jsonify({"status": "error", "message": "device limit exceeded"}), 409
 
         # 업데이트 기기 정보
         new_ble_service_uuid      = str(uuid.uuid4())

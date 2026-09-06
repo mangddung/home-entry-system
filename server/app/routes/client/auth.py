@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from cryptography.fernet import Fernet
 from flask import Blueprint, request, jsonify
 from app.utils.database.models import InviteCode, UserDeviceMapping
+from app.utils.device_utils import check_device_limit
 import jwt
 
 from app.utils.database import database as _db
@@ -186,6 +187,9 @@ def join_device():
         ).first()
         if existing:
             return jsonify({"status": "error", "message": "already joined"}), 409
+
+        if not check_device_limit(session, user_uuid):
+            return jsonify({"status": "error", "message": "device limit exceeded"}), 409
 
         invite_row.is_used = True
 

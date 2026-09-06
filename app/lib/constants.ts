@@ -23,3 +23,6 @@ export const SELECTED_DEVICE_KEY = "selected_device";
 
 export const FCM_NOTIFICATIONS_KEY = "fcm_notifications";
 export const FCM_NOTIFICATIONS_LAST_READ_AT_KEY = "fcm_notifications_last_read_at";
+
+// 서버(server/app/utils/device_utils.py의 MAX_DEVICES_PER_USER)와 값 맞출 것
+export const MAX_DEVICES_PER_USER = 20;

@@ -1,9 +1,9 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
-import { fetchDeviceSetupToken, fetchSetupUuid } from "@/lib/api/devices";
+import { fetchDeviceSetupToken, fetchSetupUuid, loadDevices } from "@/lib/api/devices";
 import { connectDevice, receiveData, scanDevice, sendSetupCode, sendWifiSetup, stopScan, triggerPairing } from "@/lib/ble";
 import NetInfo from "@react-native-community/netinfo";
-import { DEVICE_SETUP_KEY, UNFIGURED_DEVICES_KEY } from "@/lib/constants";
+import { DEVICE_SETUP_KEY, MAX_DEVICES_PER_USER, UNFIGURED_DEVICES_KEY } from "@/lib/constants";
 import { getTokenSecure, setTokenSecure } from "@/lib/token-storage";
 import { IoTDevice } from "@/lib/types";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -95,6 +95,16 @@ export default function DeviceSetupScreen() {
   const lastSeenRef = useRef<Map<string, number>>(new Map());
   const [scanTimeLeft, setScanTimeLeft] = useState(SCAN_SECONDS);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      if ((await loadDevices()).length >= MAX_DEVICES_PER_USER) {
+        Alert.alert("등록 제한", `기기는 최대 ${MAX_DEVICES_PER_USER}개까지 등록할 수 있습니다.`, [
+          { text: "확인", onPress: () => router.back() },
+        ]);
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     connectedRef.current = connected;

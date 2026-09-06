@@ -2,7 +2,8 @@ import { Colors } from "@/constants/theme";
 import { CustomAlert } from "@/components/custom-alert";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { fetchRegisterInviteCode } from "@/lib/api/auth";
-import { updateDeviceName } from "@/lib/api/devices";
+import { loadDevices, updateDeviceName } from "@/lib/api/devices";
+import { MAX_DEVICES_PER_USER } from "@/lib/constants";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { useState } from "react";
@@ -27,6 +28,10 @@ export default function RegisterInviteCodeScreen() {
   const handleSubmit = async () => {
     if (!inviteCode.trim()) {
       showAlert("오류", "초대 코드를 입력해주세요.");
+      return;
+    }
+    if ((await loadDevices()).length >= MAX_DEVICES_PER_USER) {
+      showAlert("등록 제한", `기기는 최대 ${MAX_DEVICES_PER_USER}개까지 등록할 수 있습니다.`);
       return;
     }
     setLoading(true);

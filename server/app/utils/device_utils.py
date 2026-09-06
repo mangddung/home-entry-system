@@ -8,10 +8,17 @@ import jwt
 from cryptography.fernet import Fernet
 
 from app.utils.database import database as _db
-from app.utils.database.models import DeviceManagement, DeviceRefreshToken
+from app.utils.database.models import DeviceManagement, DeviceRefreshToken, UserDeviceMapping
 
 ACCESS_TOKEN_TTL  = timedelta(hours=12)
 REFRESH_TOKEN_TTL = timedelta(days=180)
+
+MAX_DEVICES_PER_USER = 20
+
+def check_device_limit(session, user_uuid: str) -> bool:
+    """유저가 등록/참여한 기기 총 개수(역할 무관)가 제한 미만인지 확인"""
+    count = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid).count()
+    return count < MAX_DEVICES_PER_USER
 
 def _generate_device_secret() -> tuple[str, str]:
     """AES-16바이트 키 생성 후 MASTER_KEK으로 Fernet 암호화.
