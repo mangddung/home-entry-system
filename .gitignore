@@ -3,3 +3,4 @@ devlinks.html
 *.bat
 .claude/
 .vscode
+graphify-out/
