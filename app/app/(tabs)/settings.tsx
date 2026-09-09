@@ -2,6 +2,7 @@ import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
 import { refreshToken } from "@/lib/api/auth";
 import { clearDeviceStorage } from "@/lib/api/devices";
 import { revokeFcmToken } from "@/lib/api/fcm";
+import { cancelTrackingNotification } from "@/lib/background-tracking";
 import { BG_GEOFENCE_TASK, BG_LOCATION_TASK, CURRENT_LOCATION_KEY, DEVICE_STATUS_KEY, IS_ONLINE_KEY, SELECTED_DEVICE_KEY, UNFIGURED_DEVICES_KEY, USER_ACCESS_TOKEN_KEY, USER_NAME_KEY, USER_REFRESH_TOKEN_KEY, USER_SECRET_KEY, USER_UUID_KEY } from "@/lib/constants";
 import { setTokenSecure } from "@/lib/token-storage";
 import * as Location from "expo-location";
@@ -104,6 +105,7 @@ export default function SettingsScreen() {
             if (isGeofenceRegistered) {
               await Location.stopGeofencingAsync(BG_GEOFENCE_TASK);
             }
+            await cancelTrackingNotification();
           } catch {
             // ignore if task is not actually running
           }

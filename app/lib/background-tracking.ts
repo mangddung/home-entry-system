@@ -1,12 +1,13 @@
-// 사용자 활동, GPS 거리 기반 인터벌 조절
-// devices가 여러개 일때 가까운 지역 기준
-// devices.range_meter 범위 안에 들어오면 ble 트래킹 시작
+// 등록된 기기 위치마다 고정 반경(GEOFENCE_RADIUS_M) geofence를 걸고,
+// 진입 이벤트가 오면 BLE 스캔으로 실제 근접 판정을 넘긴다.
 
+import notifee, { AndroidImportance } from "@notifee/react-native";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import { loadDevices } from "./api/devices";
 import {
   BG_GEOFENCE_TASK,
+  GEOFENCE_RADIUS_M,
 } from "./constants";
 import { appendSystemLog } from "./system-log";
 import { IoTDevice } from "./types";
@@ -117,6 +118,57 @@ import { IoTDevice } from "./types";
 
 // 네이티브 geofence 등록 함수
 // ================================================================================
+const TRACKING_NOTIFICATION_ID = "geofence-tracking";
+
+// "fast" = ScanMode.LowLatency (진입 직후), "saving" = ScanMode.Balanced (그 이후)
+export type BleScanMode = "fast" | "saving";
+
+// 감시 중인 기기 수와 BLE 스캔 상태를 한 알림에 함께 표시한다.
+// 백그라운드 태스크가 재시작되면 이 값들은 초기화되므로, 없을 때도 문구가 성립해야 한다.
+let watchedDeviceCount: number | null = null;
+const bleScanning = new Map<string, BleScanMode>();
+
+// 트래킹 중임을 알리는 고정 알림 (같은 id로 다시 그리면 갱신된다)
+const renderTrackingNotification = async () => {
+  const channelId = await notifee.createChannel({
+    id: "tracking",
+    name: "위치 트래킹",
+    importance: AndroidImportance.LOW,
+  });
+  const scanning = bleScanning.size;
+  const isFast = [...bleScanning.values()].includes("fast");
+  await notifee.displayNotification({
+    id: TRACKING_NOTIFICATION_ID,
+    title: scanning > 0 ? "기기 검색 중" : "위치 트래킹 중",
+    body:
+      scanning > 0
+        ? `근처 기기 ${scanning}개를 ${isFast ? "빠른 검색" : "절전 검색"} 모드로 찾고 있습니다`
+        : watchedDeviceCount === null
+          ? "등록된 기기의 주변 진입을 감시하고 있습니다"
+          : `등록된 기기 ${watchedDeviceCount}개의 주변 진입을 감시하고 있습니다`,
+    android: { channelId, ongoing: true, onlyAlertOnce: true, pressAction: { id: "default" } },
+  });
+};
+
+const showTrackingNotification = async (count: number) => {
+  watchedDeviceCount = count;
+  await renderTrackingNotification();
+};
+
+// BLE 스캔 상태를 알림에 반영. 스캔 모드가 바뀌는 순간에만 호출되므로 갱신 비용은 무시할 수준이다.
+// mode가 null이면 해당 기기의 스캔 종료.
+export const setBleScanning = async (uuid: string, mode: BleScanMode | null) => {
+  if (mode) bleScanning.set(uuid, mode);
+  else bleScanning.delete(uuid);
+  await renderTrackingNotification();
+};
+
+export const cancelTrackingNotification = async () => {
+  bleScanning.clear();
+  watchedDeviceCount = null;
+  await notifee.cancelNotification(TRACKING_NOTIFICATION_ID);
+};
+
 let lastGeoFenceSignature = ""; // 직전 등록 내용과 같으면 재등록 스킵 (stop/start 반복으로 인한 감시 공백 방지)
 
 export const updateGeoFence = async () => {
@@ -130,7 +182,7 @@ export const updateGeoFence = async () => {
   );
   const geoFences = validDevices.map((device) => ({
     identifier: device.device_uuid,
-    radius: device.location!.range_meter,
+    radius: GEOFENCE_RADIUS_M,
     latitude: device.location!.latitude,
     longitude: device.location!.longitude,
     notifyOnEntry: true,
@@ -147,11 +199,14 @@ export const updateGeoFence = async () => {
 
   if (geoFences.length > 0) {
     await Location.startGeofencingAsync(BG_GEOFENCE_TASK, geoFences);
+    await showTrackingNotification(geoFences.length);
     appendSystemLog({
       event_name: "BG-Tracking",
       log_type: "INFO",
       message: `updated geofences: ${geoFences.length}`,
     });
+  } else {
+    await cancelTrackingNotification();
   }
   lastGeoFenceSignature = signature;
 };

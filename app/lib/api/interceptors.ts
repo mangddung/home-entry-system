@@ -16,6 +16,7 @@ import {
   USER_SECRET_KEY,
   USER_UUID_KEY,
 } from "../constants";
+import { cancelTrackingNotification } from "../background-tracking";
 import { triggerSessionAlert } from "../session-alert";
 import { setTokenSecure } from "../token-storage";
 import { clearDeviceStorage } from "./devices";
@@ -39,6 +40,7 @@ async function clearSession() {
     if (isRegistered) await Location.stopLocationUpdatesAsync(BG_LOCATION_TASK);
     const isGeofenceRegistered = await TaskManager.isTaskRegisteredAsync(BG_GEOFENCE_TASK);
     if (isGeofenceRegistered) await Location.stopGeofencingAsync(BG_GEOFENCE_TASK);
+    await cancelTrackingNotification();
   } catch {}
 }
 

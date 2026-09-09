@@ -1,4 +1,6 @@
+import { setBleScanning } from "@/lib/background-tracking";
 import { userTokenExchange } from "@/lib/ble";
+import { ScanMode } from "react-native-ble-plx";
 import { loadDevices } from "@/lib/api/devices";
 import {
   BG_GEOFENCE_TASK,
@@ -10,7 +12,11 @@ import { DeviceStatus, IoTDevice } from "@/lib/types";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 
-const BLE_TIMEOUT_MS = 5 * 60 * 1000; // 5분 타임아웃
+// geofence 진입 직후에는 문으로 이동 중일 확률이 높아 고반응 스캔,
+// 그 뒤로는 저전력 스캔으로 내려 exit까지 계속 감시한다.
+// (짧은 타임아웃을 쓰면 반경 안에 상주하다 나중에 문 앞으로 갔을 때 스캔이 이미 꺼져 있다)
+const BLE_BURST_MS = 2 * 60 * 1000;
+const BLE_MAX_TRACKING_MS = 12 * 60 * 60 * 1000; // exit 이벤트가 유실될 때를 위한 안전 상한
 const BLE_RETRY_INTERVAL_MS = 5000;
 
 const bleInProgress = new Set<string>();
@@ -106,14 +112,32 @@ const startBleTracking = async (device: IoTDevice) => {
   if (bleInProgress.has(uuid)) return;
   bleInProgress.add(uuid);
   bleAbort.delete(uuid);
-  bleTimers.set(uuid, setTimeout(() => stopBleTracking(uuid), BLE_TIMEOUT_MS));
+  bleTimers.set(uuid, setTimeout(() => stopBleTracking(uuid), BLE_MAX_TRACKING_MS));
 
   appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble tracking start (geofence enter)" });
 
+  const startedAt = Date.now();
+  let lastBurst: boolean | null = null;
+
   try {
     while (!bleAbort.has(uuid)) {
+      const burst = Date.now() - startedAt < BLE_BURST_MS;
+      // 스캔 모드가 바뀔 때만 알림을 갱신한다 (스캔 시작 시 1회 + burst 종료 시 1회)
+      if (burst !== lastBurst) {
+        lastBurst = burst;
+        void setBleScanning(uuid, burst ? "fast" : "saving");
+      }
       try {
-        await userTokenExchange(device);
+        await userTokenExchange(
+          device,
+          burst
+            ? { scanMode: ScanMode.LowLatency, timeoutMs: 30000 }
+            // 배터리를 더 줄여야 하면 ScanMode.LowPower로 내린다.
+            // Balanced는 duty 25%(1024ms/4096ms), LowPower는 10%(512ms/5120ms)로 최악 발견 지연은 4초 -> 5초 차이뿐이다.
+            // 펌웨어 광고 주기가 30~60ms라 LowPower 스캔 창에도 충분히 걸리지만,
+            // 일부 제조사가 LowPower를 더 공격적으로 스로틀하므로 실기기 확인 후 내릴 것.
+            : { scanMode: ScanMode.Balanced, timeoutMs: 60000 },
+        );
       } catch {
         // 무시하고 재시도
       }
@@ -136,6 +160,7 @@ const startBleTracking = async (device: IoTDevice) => {
   } finally {
     stopBleTracking(uuid);
     bleInProgress.delete(uuid);
+    void setBleScanning(uuid, null);
   }
 };
 
