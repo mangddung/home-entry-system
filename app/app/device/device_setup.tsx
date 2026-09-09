@@ -2,10 +2,12 @@ import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { fetchDeviceSetupToken, fetchSetupUuid, loadDevices } from "@/lib/api/devices";
 import { connectDevice, receiveData, scanDevice, sendSetupCode, sendWifiSetup, stopScan, triggerPairing } from "@/lib/ble";
+import { commitBond, dropPendingBond, markPendingBond, resetBond } from "@/lib/bond";
 import NetInfo from "@react-native-community/netinfo";
 import { DEVICE_SETUP_KEY, MAX_DEVICES_PER_USER, UNFIGURED_DEVICES_KEY } from "@/lib/constants";
 import { getTokenSecure, setTokenSecure } from "@/lib/token-storage";
 import { IoTDevice } from "@/lib/types";
+import { scanWifi24GHz, WifiNetwork } from "@/lib/wifi";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -66,6 +68,21 @@ function PulseRing({ color, delay }: { color: string; delay: number }) {
   );
 }
 
+// RSSI(dBm)를 4칸 신호 아이콘으로 변환. 잠금 여부까지 한 아이콘으로 표현한다.
+function wifiSignalIcon(level: number, secured: boolean) {
+  const bars = level >= -55 ? 4 : level >= -67 ? 3 : level >= -75 ? 2 : 1;
+  return (secured ? `wifi-strength-${bars}-lock` : `wifi-strength-${bars}`) as any;
+}
+
+// 펌웨어가 보내는 WIFI_FAIL[:사유] 코드를 안내 문구로 변환
+function wifiFailMessage(code: string): string {
+  if (code === "WIFI_FAIL:NO_AP")
+    return "해당 이름의 Wi-Fi를 찾지 못했습니다.\n\n기기는 2.4GHz Wi-Fi만 지원합니다. 5GHz 네트워크는 사용할 수 없으니 2.4GHz 네트워크를 선택해 주세요. Wi-Fi 이름에 오타가 없는지, 기기가 공유기 근처에 있는지도 확인해 주세요.";
+  if (code === "WIFI_FAIL:AUTH")
+    return "Wi-Fi 비밀번호가 올바르지 않습니다.\n\n비밀번호를 다시 확인해 주세요.";
+  return "Wi-Fi에 연결하지 못했습니다.\n\nWi-Fi 이름과 비밀번호를 확인해 주세요. 기기는 2.4GHz Wi-Fi만 지원합니다.";
+}
+
 export default function DeviceSetupScreen() {
   const scheme = useColorScheme();
   const colors = Colors[scheme ?? "light"];
@@ -88,6 +105,9 @@ export default function DeviceSetupScreen() {
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [wifiList, setWifiList] = useState<WifiNetwork[]>([]);
+  const [isScanningWifi, setIsScanningWifi] = useState(false);
+  const [wifiScanError, setWifiScanError] = useState<string | null>(null);
 
   const [proccess, setProcces] = useState(0);
   const [isScanning, setIsScanning] = useState(false);
@@ -109,6 +129,13 @@ export default function DeviceSetupScreen() {
   useEffect(() => {
     connectedRef.current = connected;
   }, [connected]);
+
+  // 등록 완료 전에 화면을 벗어나면 방금 만든 본딩을 남기지 않는다
+  useEffect(() => {
+    return () => {
+      void dropPendingBond();
+    };
+  }, []);
 
   useEffect(() => {
     if (!connected) return;
@@ -190,15 +217,34 @@ export default function DeviceSetupScreen() {
     }, [startScan]),
   );
 
-  // Wi-Fi SSID 자동 입력
+  // 2.4GHz Wi-Fi 목록 스캔 (Android 전용, iOS는 OS가 스캔 API를 제공하지 않음)
+  const refreshWifiList = useCallback(async () => {
+    setIsScanningWifi(true);
+    const result = await scanWifi24GHz();
+    setIsScanningWifi(false);
+    if (result.ok) {
+      setWifiList(result.networks);
+      setWifiScanError(null);
+    } else {
+      setWifiList([]);
+      setWifiScanError(result.reason);
+    }
+    return result;
+  }, []);
+
+  // 목록을 못 띄우는 환경(iOS·권한 거부 등)에서만 현재 연결된 SSID를 자동 입력한다.
+  // 목록이 있으면 사용자가 직접 고르므로 자동 입력하지 않는다.
   useEffect(() => {
     if (proccess !== 3) return;
-    NetInfo.fetch("wifi").then((state) => {
+    void (async () => {
+      const result = await refreshWifiList();
+      if (result.ok && result.networks.length > 0) return;
+      const state = await NetInfo.fetch("wifi");
       if (state.type === "wifi" && state.details?.ssid) {
         setWifiSsid(state.details.ssid);
       }
-    });
-  }, [proccess]);
+    })();
+  }, [proccess, refreshWifiList]);
 
   // 셋업 코드 입력 타이머
   useEffect(() => {
@@ -406,9 +452,24 @@ export default function DeviceSetupScreen() {
             {/* 입력 필드 */}
             <View style={styles.formFields}>
               <View style={styles.fieldWrap}>
-                <Text style={[styles.fieldLabel, { color: colors.tabIconDefault }]}>
-                  Wi-Fi 이름 (SSID)
-                </Text>
+                <View style={styles.fieldLabelRow}>
+                  <Text style={[styles.fieldLabel, { color: colors.tabIconDefault }]}>
+                    Wi-Fi 이름 (SSID)
+                  </Text>
+                  {Platform.OS === "android" && (
+                    <TouchableOpacity
+                      onPress={() => void refreshWifiList()}
+                      disabled={isScanningWifi}
+                      style={styles.wifiRescanButton}
+                    >
+                      {isScanningWifi ? (
+                        <ActivityIndicator size="small" color={colors.tint} />
+                      ) : (
+                        <MaterialCommunityIcons name="refresh" size={18} color={colors.tint} />
+                      )}
+                    </TouchableOpacity>
+                  )}
+                </View>
                 <TextInput
                   style={[
                     styles.fieldInput,
@@ -420,6 +481,57 @@ export default function DeviceSetupScreen() {
                   placeholderTextColor={colors.tabIconDefault}
                   autoCapitalize="none"
                 />
+
+                {/* 2.4GHz 목록 (Android). 기기가 5GHz를 지원하지 않아 2.4GHz만 노출한다. */}
+                {wifiList.length > 0 && (
+                  <View
+                    style={[
+                      styles.wifiList,
+                      { backgroundColor: cardBg, borderColor: cardBorder },
+                    ]}
+                  >
+                    {wifiList.map((net) => {
+                      const selected = net.ssid === wifiSsid;
+                      return (
+                        <TouchableOpacity
+                          key={net.ssid}
+                          style={[styles.wifiItem, { borderBottomColor: cardBorder }]}
+                          onPress={() => setWifiSsid(net.ssid)}
+                        >
+                          <MaterialCommunityIcons
+                            name={wifiSignalIcon(net.level, net.secured)}
+                            size={20}
+                            color={selected ? colors.tint : colors.tabIconDefault}
+                          />
+                          <Text
+                            style={[
+                              styles.wifiItemText,
+                              { color: selected ? colors.tint : colors.text },
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {net.ssid}
+                          </Text>
+                          {selected && (
+                            <MaterialCommunityIcons name="check" size={18} color={colors.tint} />
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+
+                {wifiScanError && (
+                  <Text style={[styles.wifiHint, { color: colors.tabIconDefault }]}>
+                    {wifiScanError === "unsupported"
+                      ? "기기는 2.4GHz Wi-Fi만 지원합니다. 5GHz 네트워크는 사용할 수 없습니다."
+                      : wifiScanError === "permission"
+                        ? "Wi-Fi 목록을 보려면 위치 권한이 필요합니다. 이름을 직접 입력해도 됩니다."
+                        : wifiScanError === "location-off"
+                          ? "Wi-Fi 목록을 보려면 위치 서비스를 켜 주세요. 이름을 직접 입력해도 됩니다."
+                          : "Wi-Fi 목록을 불러오지 못했습니다. 이름을 직접 입력해 주세요."}
+                  </Text>
+                )}
               </View>
 
               <View style={styles.fieldWrap}>
@@ -470,9 +582,16 @@ export default function DeviceSetupScreen() {
                 const apiResponse = await receiveData(connected!, setupDevice!);
                 setIsSubmitting(false);
                 if (apiResponse == "REGISTERED") {
+                  await commitBond(deviceUuid);
                   const device = [{ device_uuid: deviceUuid, type: "location" }];
                   await setTokenSecure(UNFIGURED_DEVICES_KEY, JSON.stringify(device));
                   router.push("/device/location-setup");
+                } else if (apiResponse?.startsWith("WIFI_FAIL")) {
+                  Alert.alert("Wi-Fi 연결 실패", wifiFailMessage(apiResponse), [{ text: "확인" }]);
+                } else {
+                  Alert.alert("설정 실패", "기기 등록에 실패했습니다. 잠시 후 다시 시도해 주세요.", [
+                    { text: "확인" },
+                  ]);
                 }
               }}
             >
@@ -612,11 +731,13 @@ export default function DeviceSetupScreen() {
                 onPress={async () => {
                   if (isConnecting) return;
                   setIsConnecting(d.id);
+                  await resetBond(d.id);
                   const conn = await connectDevice(d);
                   if (!conn) {
                     setIsConnecting(null);
                     return;
                   }
+                  await markPendingBond(d.id);
                   await triggerPairing(conn, setupDevice);
                   const nonce = await receiveData(conn, setupDevice);
                   if (nonce == null) {
@@ -770,6 +891,36 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 14,
     fontSize: 16,
+  },
+  fieldLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  wifiRescanButton: {
+    padding: 4,
+  },
+  wifiList: {
+    borderWidth: 1,
+    borderRadius: 12,
+    overflow: "hidden",
+  },
+  wifiItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  wifiItemText: {
+    flex: 1,
+    fontSize: 15,
+  },
+  wifiHint: {
+    fontSize: 12,
+    lineHeight: 17,
+    marginLeft: 2,
   },
   passwordWrap: {
     flexDirection: "row",

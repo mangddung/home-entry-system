@@ -427,13 +427,35 @@ static void compute_sha256_hex(const char *code, const char *nonce, char out_hex
 }
 
 // ── Setup WiFi helper ─────────────────────────────────────────────────────────
+static uint8_t s_setup_wifi_reason = 0;   // 마지막 STA_DISCONNECTED 사유
+
 static void setup_wifi_event_handler(void *arg, esp_event_base_t base,
                                       int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *ev = (wifi_event_sta_disconnected_t *)data;
+        if (ev) s_setup_wifi_reason = ev->reason;
         xEventGroupSetBits(s_setup_wifi_eg, SETUP_WIFI_FAIL_BIT);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         xEventGroupSetBits(s_setup_wifi_eg, SETUP_WIFI_OK_BIT);
+    }
+}
+
+// disconnect 사유를 앱이 안내 문구로 쓸 수 있는 코드로 매핑.
+// NO_AP: SSID를 못 찾음 — 5GHz 전용 AP거나 범위 밖 (ESP32-C6는 2.4GHz만 지원)
+// AUTH:  AP는 찾았으나 인증 실패 — 비밀번호 오류가 대부분
+static const char *setup_wifi_fail_code(void)
+{
+    switch (s_setup_wifi_reason) {
+        case WIFI_REASON_NO_AP_FOUND:
+            return "WIFI_FAIL:NO_AP";
+        case WIFI_REASON_AUTH_EXPIRE:
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return "WIFI_FAIL:AUTH";
+        default:
+            return "WIFI_FAIL";
     }
 }
 
@@ -462,6 +484,7 @@ static bool setup_wifi_connect(const char *ssid, const char *pw)
     strlcpy((char *)wifi_cfg.sta.password, pw,   sizeof(wifi_cfg.sta.password));
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
+    s_setup_wifi_reason = 0;
     xEventGroupClearBits(s_setup_wifi_eg, SETUP_WIFI_OK_BIT | SETUP_WIFI_FAIL_BIT);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -566,8 +589,10 @@ static void setup_flow_task(void *arg)
         ESP_LOGI(TAG, "Setup: connecting WiFi \"%s\"", wifi_ssid);
         if (!setup_wifi_connect(wifi_ssid, wifi_pw)) {
             retry_count++;
-            ESP_LOGW(TAG, "Setup: WiFi failed (retry %d/%d)", retry_count, SETUP_MAX_RETRIES);
-            setup_notify("WIFI_FAIL");
+            const char *fail_code = setup_wifi_fail_code();
+            ESP_LOGW(TAG, "Setup: WiFi failed (reason %d, %s) (retry %d/%d)",
+                     s_setup_wifi_reason, fail_code, retry_count, SETUP_MAX_RETRIES);
+            setup_notify(fail_code);
             cred_wait = pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS);
             continue;
         }
