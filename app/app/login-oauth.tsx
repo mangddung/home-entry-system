@@ -8,6 +8,7 @@ import {
   USER_REFRESH_TOKEN_KEY,
   USER_UUID_KEY,
 } from "@/lib/constants";
+import { appendSystemLog } from "@/lib/system-log";
 import { setTokenSecure } from "@/lib/token-storage";
 import axios from "axios";
 import { useRouter } from "expo-router";
@@ -63,8 +64,10 @@ export default function LoginOAuthScreen() {
       const url = `${BACKEND_URL}/auth/kakao/config`;
       const res = await axios.get<KakaoConfig>(url, { timeout: 5000 });
       setKakaoConfig(res.data);
+      appendSystemLog({ event_name: "Login", log_type: "INFO", message: "kakao config 요청 성공" });
     } catch (e) {
       console.error("[kakao_config] error=", e);
+      appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `kakao config 요청 실패: ${e}` });
       Alert.alert("서버 통신 실패", "카카오 로그인 설정을 불러오지 못했습니다.");
     }
   };
@@ -82,6 +85,7 @@ export default function LoginOAuthScreen() {
     }
 
     setLoading(true);
+    appendSystemLog({ event_name: "Login", log_type: "INFO", message: "카카오 로그인 시작" });
     try {
       const authUrl =
         `https://kauth.kakao.com/oauth/authorize` +
@@ -91,7 +95,13 @@ export default function LoginOAuthScreen() {
 
       const result = await WebBrowser.openAuthSessionAsync(authUrl, "iotapp://login_oauth");
 
+      if (result.type === "cancel" || result.type === "dismiss") {
+        appendSystemLog({ event_name: "Login", log_type: "INFO", message: "카카오 로그인 취소" });
+        return;
+      }
+
       if (result.type !== "success") {
+        appendSystemLog({ event_name: "Login", log_type: "WARNING", message: `카카오 인증 세션 실패: ${result.type}` });
         Alert.alert("오류", "로그인 중 오류가 발생했습니다.(코드 101)");
         router.replace("/login-oauth");
         return;
@@ -104,6 +114,7 @@ export default function LoginOAuthScreen() {
       const userUuid = resultUrl.searchParams.get("user_uuid");
 
       if (error || !access_token || !refresh_token || !userUuid) {
+        appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `카카오 로그인 콜백 오류: ${error ?? "토큰 누락"}` });
         Alert.alert("로그인 실패", error ?? "인증에 실패했습니다.");
         return;
       }
@@ -116,14 +127,17 @@ export default function LoginOAuthScreen() {
       const key_request_result = await fetchSecretKey();
 
       if (key_request_result.type !== "success") {
+        appendSystemLog({ event_name: "Login", log_type: "ERROR", message: "secret key 요청 실패로 로그인 중단" });
         Alert.alert("오류", "로그인 중 오류가 발생했습니다.(코드 102)");
         router.replace("/login-oauth");
         return;
       }
       await fetchFcmToken();
 
+      appendSystemLog({ event_name: "Login", log_type: "INFO", message: "카카오 로그인 완료" });
       router.replace("/(tabs)/home");
-    } catch {
+    } catch (e) {
+      appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `로그인 처리 중 예외: ${e}` });
       Alert.alert("오류", "로그인 중 오류가 발생했습니다.(100)");
       router.replace("/login-oauth");
     } finally {

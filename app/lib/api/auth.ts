@@ -6,6 +6,7 @@ import {
   USER_SECRET_KEY,
 } from "../constants";
 import { getTokenSecure, setTokenSecure } from "../token-storage";
+import { appendSystemLog } from "../system-log";
 import { getApiErrorMessage } from "./errors";
 
 async function setTokenIfString(key: string, value: unknown) {
@@ -24,8 +25,10 @@ export const fetchSecretKey = async () => {
     });
     const secret_key: string = response.data.secret_key;
     await setTokenSecure(USER_SECRET_KEY, secret_key);
+    appendSystemLog({ event_name: "Login", log_type: "INFO", message: "secret key 요청 성공" });
     return { type: "success", message: "시크릿 키를 불러왔습니다." };
   } catch (error) {
+    appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `secret key 요청 실패: ${getApiErrorMessage(error)}` });
     return { type: "error", message: getApiErrorMessage(error) };
   }
 };
