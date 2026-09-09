@@ -250,10 +250,18 @@ export default function DeviceInfoView() {
 
   const handleManualAuth = async () => {
     if (!device) return;
+    if (getPingColor(device.last_ping_at) === "#ef4444") {
+      showAlert("오류", "기기가 오프라인 상태입니다.");
+      return;
+    }
     setIsAuthenticating(true);
     try {
-      await userTokenExchange(device);
-      showAlert("수동 인증", "인증 요청이 완료되었습니다.");
+      const success = await userTokenExchange(device);
+      if (success) {
+        showAlert("수동 인증", "인증 요청이 완료되었습니다.");
+      } else {
+        showAlert("오류", "기기에 연결할 수 없습니다. 기기가 오프라인 상태이거나 범위 밖에 있는지 확인하세요.");
+      }
     } catch {
       showAlert("오류", "인증 중 오류가 발생했습니다.");
     } finally {
@@ -508,10 +516,13 @@ export default function DeviceInfoView() {
                 <TouchableOpacity
                   style={[
                     styles.cardActionBtn,
-                    { backgroundColor: isDark ? "rgba(59,130,246,0.12)" : "#EFF6FF", opacity: isAuthenticating ? 0.6 : 1 },
+                    {
+                      backgroundColor: isDark ? "rgba(59,130,246,0.12)" : "#EFF6FF",
+                      opacity: isAuthenticating || pingColor === "#ef4444" ? 0.4 : 1,
+                    },
                   ]}
                   onPress={handleManualAuth}
-                  disabled={isAuthenticating}
+                  disabled={isAuthenticating || pingColor === "#ef4444"}
                 >
                   {isAuthenticating ? (
                     <ActivityIndicator size={15} color="#3B82F6" />

@@ -42,7 +42,13 @@ export const stopScan = () => {
   }
 };
 
-export const scanDevice = async (ioTDevice: IoTDevice, onDeviceFound?: (device: Device) => void): Promise<Device[]> => {
+export type ScanOptions = { scanMode?: ScanMode; timeoutMs?: number };
+
+export const scanDevice = async (
+  ioTDevice: IoTDevice,
+  onDeviceFound?: (device: Device) => void,
+  opts?: ScanOptions,
+): Promise<Device[]> => {
   if (isScanning) {
     logDebug({ event_name: event_name, log_type: "DEBUG", message: "이미 스캔 중, 건너뜀" });
     return [];
@@ -92,9 +98,9 @@ export const scanDevice = async (ioTDevice: IoTDevice, onDeviceFound?: (device: 
         message: `스캔 완료: ${found.size}개 발견`,
       });
       resolve([...found.values()]);
-    }, 30000);
+    }, opts?.timeoutMs ?? 30000);
 
-    manager.startDeviceScan([bleUuids.ble_service_uuid], { scanMode: ScanMode.LowLatency }, async (error, device) => {
+    manager.startDeviceScan([bleUuids.ble_service_uuid], { scanMode: opts?.scanMode ?? ScanMode.LowLatency }, async (error, device) => {
       if (error) {
         clearTimeout(scanTimeout);
         manager.stopDeviceScan();
@@ -199,7 +205,7 @@ export const receiveData = (connected: Device, ioTDevice: IoTDevice): Promise<st
   });
 };
 
-export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, nonce: any) => {
+export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, nonce: any): Promise<boolean> => {
   const bleUuids = ioTDevice.ble_uuids;
   // 앱 -> ESP 데이터 전송
   try {
@@ -211,7 +217,7 @@ export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, no
         log_type: "WARNING",
         message: "user uuid, secret key 없음",
       });
-      return;
+      return false;
     }
     const payload = {
       nonce: nonce,
@@ -248,12 +254,14 @@ export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, no
       deviceStatus.bleSuccess = deviceStatus.device_uuid === ioTDevice.device_uuid;
     });
     await setTokenSecure(DEVICE_STATUS_KEY, JSON.stringify(parsedDeviceStatus));
+    return true;
   } catch (e: any) {
     logDebug({
       event_name: event_name,
       log_type: "WARNING",
       message: `암호화/전송 실패: ${e}`,
     });
+    return false;
   }
 };
 
@@ -325,12 +333,12 @@ export const sendWifiSetup = async (
   }
 };
 
-export const userTokenExchange = async (ioTDevice: IoTDevice) => {
-  const devices = await scanDevice(ioTDevice);
-  if (!devices.length) return;
+export const userTokenExchange = async (ioTDevice: IoTDevice, opts?: ScanOptions): Promise<boolean> => {
+  const devices = await scanDevice(ioTDevice, undefined, opts);
+  if (!devices.length) return false;
   const connected = await connectDevice(devices[0]);
-  if (!connected) return;
+  if (!connected) return false;
   const nonce = await receiveData(connected, ioTDevice);
-  if (nonce == null) return;
-  await sendUserAuthToken(connected, ioTDevice, nonce);
+  if (nonce == null) return false;
+  return await sendUserAuthToken(connected, ioTDevice, nonce);
 };
