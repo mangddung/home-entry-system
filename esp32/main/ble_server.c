@@ -36,7 +36,9 @@ static uint16_t s_notify_handle;               // value handle for char_esp_to_a
 static char     s_current_otp[7] = "";         // 6-hex-char OTP + NUL
 
 static esp_timer_handle_t s_auth_timer = NULL;
+static esp_timer_handle_t s_subscribe_timer = NULL;
 static bool s_adv_enabled  = false;            // normal mode: init 완료 후 true
+static bool s_ble_synced   = false;            // NimBLE 호스트 sync 완료 여부
 static bool s_setup_mode   = false;            // setup 모드 여부
 static bool s_encrypted    = false;            // 현재 연결 암호화 여부
 
@@ -86,6 +88,8 @@ static bool parse_uuid128(const char *str, ble_uuid128_t *out)
 
 // ── Forward declarations ───────────────────────────────────────────────────────
 static void ble_advertise(void);
+#define SUBSCRIBE_TIMEOUT_MS 10000   // 연결 후 notify 구독까지 허용 시간
+
 static int  gap_event_handler(struct ble_gap_event *event, void *arg);
 
 // ── Auth timeout ──────────────────────────────────────────────────────────────
@@ -116,6 +120,35 @@ static void auth_timer_start(void)
 static void auth_timer_stop(void)
 {
     if (s_auth_timer) esp_timer_stop(s_auth_timer);
+}
+
+// ── Subscribe watchdog ────────────────────────────────────────────────────────
+// notify 구독 없이 붙어 있는 연결(Android 설정 화면 등)은 OTP를 받을 자격이 없다.
+// 정해진 시간 안에 구독하지 않으면 연결을 끊는다.
+static void subscribe_timeout_cb(void *arg)
+{
+    ESP_LOGW(TAG, "No notify subscription – dropping connection");
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+}
+
+static void subscribe_timer_start(void)
+{
+    if (s_subscribe_timer == NULL) {
+        esp_timer_create_args_t args = {
+            .callback = subscribe_timeout_cb,
+            .name     = "sub_tmr",
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&args, &s_subscribe_timer));
+    }
+    esp_timer_stop(s_subscribe_timer);
+    esp_timer_start_once(s_subscribe_timer, (uint64_t)SUBSCRIBE_TIMEOUT_MS * 1000);
+}
+
+static void subscribe_timer_stop(void)
+{
+    if (s_subscribe_timer) esp_timer_stop(s_subscribe_timer);
 }
 
 // ── GATT characteristic callbacks ─────────────────────────────────────────────
@@ -275,7 +308,10 @@ static void ble_advertise(void)
 void ble_advertising_start(void)
 {
     s_adv_enabled = true;
-    ble_advertise();
+    // iot/init이 BLE sync보다 먼저 끝날 수 있다. 스택 준비 전에 광고하면
+    // NimBLE 내부 NULL 참조로 죽으므로, sync 콜백에서 대신 시작한다.
+    if (s_ble_synced) ble_advertise();
+    else ESP_LOGI(TAG, "init OK – waiting for BLE stack sync to advertise");
 }
 
 void ble_server_disconnect(void)
@@ -289,30 +325,19 @@ void ble_server_clear_bonds(void)
     ble_store_clear();
 }
 
-// ── Connect task: generate OTP, wait 3 s, then notify ────────────────────────
-static void connect_task(void *arg)
+// ── OTP 발급: 앱이 notify를 구독한 뒤에만 호출된다 ───────────────────────────
+static void issue_otp(uint16_t conn_handle)
 {
-    uint16_t conn_handle = (uint16_t)(uintptr_t)arg;
-
-    // Generate 6-digit hex OTP
     uint32_t rnd = esp_random() & 0x00FFFFFF;
     snprintf(s_current_otp, sizeof(s_current_otp), "%06" PRIx32, rnd);
     ESP_LOGI(TAG, "OTP issued: %s", s_current_otp);
 
-    // Wait before notifying (allows app to subscribe first)
-    vTaskDelay(pdMS_TO_TICKS(BLE_NOTIFY_DELAY_MS));
-
-    // Start auth timeout
     auth_timer_start();
 
-    // Send notification
-    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(s_current_otp, 6);
-        if (om) {
-            ble_gatts_notify_custom(conn_handle, s_notify_handle, om);
-        }
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(s_current_otp, 6);
+    if (om) {
+        ble_gatts_notify_custom(conn_handle, s_notify_handle, om);
     }
-    vTaskDelete(NULL);
 }
 
 // ── GAP event handler ─────────────────────────────────────────────────────────
@@ -323,8 +348,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
             if (event->connect.status == 0) {
                 ESP_LOGI(TAG, "App connected (handle %d)", event->connect.conn_handle);
                 s_conn_handle = event->connect.conn_handle;
-                xTaskCreate(connect_task, "ble_conn", 4096,
-                            (void *)(uintptr_t)s_conn_handle, 5, NULL);
+                subscribe_timer_start();
             } else {
                 ble_advertise();
             }
@@ -332,10 +356,19 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
         case BLE_GAP_EVENT_DISCONNECT:
             ESP_LOGI(TAG, "App disconnected (reason %d)", event->disconnect.reason);
+            subscribe_timer_stop();
             auth_timer_stop();
             s_current_otp[0] = '\0';
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
             if (s_adv_enabled) ble_advertise();
+            break;
+
+        case BLE_GAP_EVENT_SUBSCRIBE:
+            if (event->subscribe.attr_handle == s_notify_handle &&
+                event->subscribe.cur_notify) {
+                subscribe_timer_stop();
+                issue_otp(event->subscribe.conn_handle);
+            }
             break;
 
         case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -364,8 +397,12 @@ static void on_ble_sync(void)
 {
     ble_hs_util_ensure_addr(1);
     ble_att_set_preferred_mtu(512);
+    s_ble_synced = true;
     if (s_setup_mode) {
         setup_ble_advertise();
+    } else if (s_adv_enabled) {
+        ESP_LOGI(TAG, "BLE stack ready – init already OK, advertising now");
+        ble_advertise();
     } else {
         ESP_LOGI(TAG, "BLE stack ready – waiting for init OK to start advertising");
     }
