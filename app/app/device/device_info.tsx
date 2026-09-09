@@ -14,7 +14,7 @@ import {
   fetchInviteCode,
   fetchMember,
 } from "@/lib/api/members";
-import { SELECTED_DEVICE_KEY, USER_UUID_KEY } from "@/lib/constants";
+import { GEOFENCE_RADIUS_M, SELECTED_DEVICE_KEY, USER_UUID_KEY } from "@/lib/constants";
 import { getTokenSecure } from "@/lib/token-storage";
 import { MemberInfo, type IoTDevice } from "@/lib/types";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -64,7 +64,7 @@ const mapHTML = `
     function setDevice(d) {
       layers.forEach(function(l) { map.removeLayer(l); });
       layers = [];
-      var lat = d.latitude, lon = d.longitude, range = d.range_meter;
+      var lat = d.latitude, lon = d.longitude, range = ${GEOFENCE_RADIUS_M};
       var icon = L.divIcon({
         className: '',
         html: '<div style="background:#0a7ea4;color:#fff;padding:3px 8px;border-radius:6px;font-size:11px;font-weight:600;white-space:nowrap;">장치</div>',

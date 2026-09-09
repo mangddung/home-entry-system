@@ -1,7 +1,7 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { fetchDeviceLocation, loadDevices } from "@/lib/api/devices";
-import { UNFIGURED_DEVICES_KEY } from "@/lib/constants";
+import { GEOFENCE_RADIUS_M, UNFIGURED_DEVICES_KEY } from "@/lib/constants";
 import { getTokenSecure } from "@/lib/token-storage";
 import type { IoTDevice } from "@/lib/types";
 import { Toast } from "@ant-design/react-native";
@@ -63,48 +63,7 @@ const mapHTML = `
     #panel-hint {
       font-size: 12px;
       color: #888;
-      margin-bottom: 6px;
-    }
-    #panel-warning {
-      font-size: 11px;
-      color: #F57C00;
-      margin-bottom: 14px;
-    }
-
-    .slider-row {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .range-label {
-      font-size: 11px;
-      color: #aaa;
-      white-space: nowrap;
-    }
-    #range-slider {
-      flex: 1;
-      -webkit-appearance: none;
-      appearance: none;
-      height: 6px;
-      border-radius: 3px;
-      background: linear-gradient(to right, #4285F4 0%, #4285F4 var(--val, 14%), #e0e0e0 var(--val, 14%));
-      outline: none;
-    }
-    #range-slider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 24px;
-      height: 24px;
-      border-radius: 50%;
-      background: #4285F4;
-      cursor: pointer;
-      box-shadow: 0 2px 8px rgba(66,133,244,0.45);
-    }
-    #range-val {
-      font-size: 15px;
-      font-weight: 700;
-      color: #4285F4;
-      min-width: 46px;
-      text-align: right;
+      margin-bottom: 4px;
     }
 
     #hint-overlay {
@@ -142,17 +101,11 @@ const mapHTML = `
 
   <div id="panel">
     <div id="panel-header">
-      <div id="panel-title">감지 범위</div>
+      <div id="panel-title">이 위치로 등록</div>
       <button id="confirm-btn" onclick="onConfirm()">확인</button>
     </div>
     <div id="panel-hint">핀을 다시 눌러 위치를 변경할 수 있습니다</div>
-    <div id="panel-warning">⚠ 범위가 넓을수록 배터리 소모가 커질 수 있습니다</div>
-    <div class="slider-row">
-      <span class="range-label">15m</span>
-      <input id="range-slider" type="range" min="15" max="100" value="30" />
-      <span class="range-label">100m</span>
-      <span id="range-val">30m</span>
-    </div>
+    <div id="panel-hint">기기 주변 약 ${GEOFENCE_RADIUS_M}m 안에 들어오면 자동으로 기기를 찾기 시작합니다</div>
   </div>
 
   <script>
@@ -165,19 +118,12 @@ const mapHTML = `
 
     var pin = null;
     var circle = null;
-    var currentRange = 30;
-
-    function updateSliderTrack(val) {
-      var pct = ((val - 15) / (100 - 15) * 100).toFixed(1) + '%';
-      document.getElementById('range-slider').style.setProperty('--val', pct);
-    }
-    updateSliderTrack(30);
 
     function notifyNative() {
       if (!pin || !window.ReactNativeWebView) return;
       var ll = pin.getLatLng();
       window.ReactNativeWebView.postMessage(JSON.stringify({
-        lat: ll.lat, lng: ll.lng, range: currentRange
+        lat: ll.lat, lng: ll.lng
       }));
     }
 
@@ -193,7 +139,7 @@ const mapHTML = `
         });
         pin = L.marker(latlng, { icon: icon, draggable: true }).addTo(map);
         circle = L.circle(latlng, {
-          radius: currentRange,
+          radius: ${GEOFENCE_RADIUS_M},
           color: '#4285F4',
           fillColor: '#4285F4',
           fillOpacity: 0.12,
@@ -220,7 +166,7 @@ const mapHTML = `
       if (!pin || !window.ReactNativeWebView) return;
       var ll = pin.getLatLng();
       window.ReactNativeWebView.postMessage(JSON.stringify({
-        type: 'confirm', lat: ll.lat, lng: ll.lng, range: currentRange
+        type: 'confirm', lat: ll.lat, lng: ll.lng
       }));
     }
 
@@ -234,10 +180,16 @@ const mapHTML = `
       placePin(latlng);
     }
 
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
     function addExistingDevices(devices) {
       devices.forEach(function(d) {
         if (!d.location) return;
-        var label = d.device_nickname || d.device_uuid.substring(0, 8) + '...';
+        var label = esc(d.device_nickname || d.device_uuid.substring(0, 8) + '...');
         var icon = L.divIcon({
           className: '',
           html: '<div style="width:13px;height:13px;border-radius:50%;background:#6B7280;border:2.5px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,0.3);"></div>',
@@ -247,7 +199,7 @@ const mapHTML = `
           .addTo(map)
           .bindTooltip(label, { permanent: true, direction: 'top', offset: [0, -6], className: 'device-label' });
         L.circle([d.location.latitude, d.location.longitude], {
-          radius: d.location.range_meter,
+          radius: ${GEOFENCE_RADIUS_M},
           color: '#6B7280',
           fillColor: '#6B7280',
           fillOpacity: 0.08,
@@ -257,14 +209,6 @@ const mapHTML = `
       });
     }
 
-    var slider = document.getElementById('range-slider');
-    slider.addEventListener('input', function() {
-      currentRange = parseInt(this.value);
-      document.getElementById('range-val').textContent = currentRange + 'm';
-      updateSliderTrack(currentRange);
-      if (circle) circle.setRadius(currentRange);
-      notifyNative();
-    });
   </script>
 </body>
 </html>
@@ -282,23 +226,26 @@ export default function LocationSetupScreen() {
   const existingDevicesRef = useRef<IoTDevice[]>([]);
 
   const [targetDevice, setTargetDevice] = useState<{ device_uuid: string } | null>(null);
-  const [pendingLocation, setPendingLocation] = useState<{ lat: number; lng: number; range: number } | null>(null);
+  const [pendingLocation, setPendingLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [nicknameVisible, setNicknameVisible] = useState(false);
   const [nickname, setNickname] = useState("");
 
-  const onConfirm = async (_lat: number, _lng: number, _range: number, _nickname: string) => {
+  const onConfirm = async (_lat: number, _lng: number, _nickname: string) => {
     if (!targetDevice) return;
-    const result = await fetchDeviceLocation(targetDevice.device_uuid, _lat, _lng, _range, _nickname);
+    const result = await fetchDeviceLocation(targetDevice.device_uuid, _lat, _lng, _nickname);
     if (result!.type === "success") Toast.info("위치 등록 성공");
   };
 
-  const handleNicknameConfirm = async () => {
-    if (!nickname.trim() || !pendingLocation) return;
+  const submitLocation = async (_nickname: string) => {
+    if (!pendingLocation) return;
     setNicknameVisible(false);
-    await onConfirm(pendingLocation.lat, pendingLocation.lng, pendingLocation.range, nickname.trim());
+    await onConfirm(pendingLocation.lat, pendingLocation.lng, _nickname);
     setNickname("");
     setPendingLocation(null);
   };
+
+  const handleNicknameConfirm = () => submitLocation(nickname.trim());
+  const handleNicknameSkip = () => submitLocation("");
 
   const onMessage = (event: { nativeEvent: { data: string } }) => {
     try {
@@ -311,7 +258,7 @@ export default function LocationSetupScreen() {
           useNativeDriver: false,
         }).start();
       } else if (data.type === "confirm") {
-        setPendingLocation({ lat: data.lat, lng: data.lng, range: data.range });
+        setPendingLocation({ lat: data.lat, lng: data.lng });
         setNicknameVisible(true);
       }
     } catch {}
@@ -324,11 +271,27 @@ export default function LocationSetupScreen() {
   };
 
   const handleLocate = async () => {
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== "granted") return;
-    const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-    const { latitude, longitude } = loc.coords;
-    webViewRef.current?.injectJavaScript(`goToLocation(${latitude}, ${longitude}); true;`);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") {
+        Toast.info("위치 권한이 필요합니다");
+        return;
+      }
+      // GPS fix를 우선 기다리고(정확도 우선), 실내 등으로 15초 내 안 잡히면 마지막 위치로 대체
+      const loc =
+        (await Promise.race([
+          Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000)),
+        ])) ?? (await Location.getLastKnownPositionAsync());
+      if (!loc) {
+        Toast.info("현재 위치를 가져오지 못했습니다");
+        return;
+      }
+      const { latitude, longitude } = loc.coords;
+      webViewRef.current?.injectJavaScript(`goToLocation(${latitude}, ${longitude}); true;`);
+    } catch {
+      Toast.info("현재 위치를 가져오지 못했습니다");
+    }
   };
 
   useEffect(() => {
@@ -360,7 +323,7 @@ export default function LocationSetupScreen() {
       <View style={[styles.titleBar, { backgroundColor: colors.background, borderBottomColor: isDark ? "#2a2d2e" : "#eee" }]}>
         <Text style={[styles.titleText, { color: colors.text }]}>위치 설정</Text>
         {targetDevice && (
-          <Text style={[styles.titleSub, { color: colors.icon }]} numberOfLines={1}>{targetDevice.device_uuid}</Text>
+          <Text style={[styles.titleSub, { color: colors.icon }]} numberOfLines={1}>{targetDevice.device_uuid.slice(0, 8)}…</Text>
         )}
       </View>
       <WebView
@@ -374,6 +337,7 @@ export default function LocationSetupScreen() {
         onLoad={() => {
           mapReadyRef.current = true;
           injectExistingDevices();
+          void handleLocate();
         }}
       />
       <Animated.View style={[styles.locateBtn, { bottom: btnBottom, backgroundColor: isDark ? "#1e2022" : "#fff" }]}>
@@ -399,6 +363,9 @@ export default function LocationSetupScreen() {
             <View style={styles.modalFooter}>
               <TouchableOpacity style={[styles.modalBtnSecondary, { backgroundColor: isDark ? "#2a2d2e" : "#F3F4F6" }]} onPress={() => setNicknameVisible(false)}>
                 <Text style={[styles.modalBtnSecondaryText, { color: colors.icon }]}>취소</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.modalBtnSecondary, { backgroundColor: isDark ? "#2a2d2e" : "#F3F4F6" }]} onPress={handleNicknameSkip}>
+                <Text style={[styles.modalBtnSecondaryText, { color: colors.icon }]}>건너뛰기</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.modalBtnPrimary, !nickname.trim() && styles.modalBtnDisabled]}

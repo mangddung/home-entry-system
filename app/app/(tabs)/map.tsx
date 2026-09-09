@@ -1,9 +1,9 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { loadDevices } from "@/lib/api/devices";
-import { CURRENT_LOCATION_KEY } from "@/lib/constants";
+import { GEOFENCE_RADIUS_M } from "@/lib/constants";
 import { readLogs } from "@/lib/system-log";
-import { getTokenSecure } from "@/lib/token-storage";
+import * as Location from "expo-location";
 import { LocationObject } from "expo-location";
 import { useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -12,7 +12,8 @@ import { WebView } from "react-native-webview";
 
 type DeviceLocation = {
   device_uuid: string;
-  location: { latitude: number; longitude: number; range_meter: number };
+  device_nickname: string | null;
+  location: { latitude: number; longitude: number };
 };
 
 type GpsPoint = {
@@ -80,20 +81,26 @@ const mapHTML = `
     var timelineLayers = [];
     var currentLat = null, currentLon = null;
 
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
     function addDeviceMarkers(devices) {
       deviceLayers.forEach(function(l) { map.removeLayer(l); });
       deviceLayers = [];
       devices.forEach(function(d) {
-        var label = d.device_uuid.substring(0, 6);
+        var label = esc(d.device_nickname || d.device_uuid.substring(0, 8) + '...');
         var lat = d.location.latitude;
         var lon = d.location.longitude;
-        var range = d.location.range_meter;
+        var range = ${GEOFENCE_RADIUS_M};
         var icon = L.divIcon({
           className: '',
           html: '<div style="background:#E53935;color:#fff;padding:2px 5px;border-radius:4px;font-size:11px;white-space:nowrap;">' + label + '</div>',
           iconAnchor: [18, 8]
         });
-        var m = L.marker([lat, lon], { icon: icon }).addTo(map).bindPopup(d.device_uuid);
+        var m = L.marker([lat, lon], { icon: icon }).addTo(map).bindPopup(label);
         var c = L.circle([lat, lon], { radius: range, color: '#E53935', fillOpacity: 0.1 }).addTo(map);
         deviceLayers.push(m, c);
       });
@@ -178,6 +185,7 @@ export default function MapScreen() {
   const [userLocation, setUserLocation] = useState<LocationObject | null>(null);
   const webViewRef = useRef<WebView>(null);
   const mapReadyRef = useRef(false);
+  const centeredRef = useRef(false);
   const [devices, setDevices] = useState<DeviceLocation[]>([]);
 
   const [showTimeline, setShowTimeline] = useState(false);
@@ -187,11 +195,23 @@ export default function MapScreen() {
   const availableDates = Object.keys(gpsData).sort().reverse();
 
   useEffect(() => {
-    const poll = setInterval(async () => {
-      const raw = await getTokenSecure(CURRENT_LOCATION_KEY);
-      if (raw) setUserLocation(JSON.parse(raw));
-    }, 1000);
-    return () => clearInterval(poll);
+    let sub: Location.LocationSubscription | null = null;
+    let cancelled = false;
+    void (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted" || cancelled) return;
+      const last = await Location.getLastKnownPositionAsync();
+      if (last && !cancelled) setUserLocation(last);
+      sub = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, distanceInterval: 10, timeInterval: 5000 },
+        (loc) => setUserLocation(loc),
+      );
+      if (cancelled) sub.remove();
+    })();
+    return () => {
+      cancelled = true;
+      sub?.remove();
+    };
   }, []);
 
   const loadGpsData = useCallback(() => {
@@ -210,7 +230,17 @@ export default function MapScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      void loadDevices().then(setDevices);
+      void loadDevices().then((list) =>
+        setDevices(
+          list
+            .filter((d) => !!d.location && d.location.latitude !== null)
+            .map((d) => ({
+              device_uuid: d.device_uuid,
+              device_nickname: d.device_nickname,
+              location: d.location!,
+            })),
+        ),
+      );
     }, []),
   );
 
@@ -224,7 +254,10 @@ export default function MapScreen() {
     const lat = parseFloat(String(userLocation.coords.latitude));
     const lon = parseFloat(String(userLocation.coords.longitude));
     const accuracy = (userLocation.coords.accuracy as any) ?? 0;
-    webViewRef.current?.injectJavaScript(`updatePosition(${lat}, ${lon}, ${accuracy}); true;`);
+    const center = centeredRef.current ? "" : `centerToCurrentPosition(${lat}, ${lon});`;
+    // 캐시된 부정확한 좌표(첫 last-known)에 화면이 고정되지 않도록, 정확도가 확보된 뒤에만 센터링을 멈춘다
+    centeredRef.current = accuracy > 0 && accuracy <= 100;
+    webViewRef.current?.injectJavaScript(`updatePosition(${lat}, ${lon}, ${accuracy}); ${center} true;`);
   }, [userLocation]);
 
   useEffect(() => {
@@ -246,6 +279,7 @@ export default function MapScreen() {
       const lat = parseFloat(String(userLocation.coords.latitude));
       const lon = parseFloat(String(userLocation.coords.longitude));
       const accuracy = userLocation.coords.accuracy ?? 0;
+      centeredRef.current = true;
       webViewRef.current?.injectJavaScript(
         `updatePosition(${lat}, ${lon}, ${accuracy}); centerToCurrentPosition(${lat}, ${lon}); true;`,
       );

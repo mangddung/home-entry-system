@@ -1,6 +1,6 @@
 import { fetchDevices, loadDevices } from "@/lib/api/devices";
 import { userTokenExchange } from "@/lib/ble";
-import { DEBUG_LOG } from "@/lib/constants";
+import { DEBUG_LOG, GEOFENCE_RADIUS_M } from "@/lib/constants";
 import { getTokenSecure } from "@/lib/token-storage";
 import type { DebugLog, IoTDevice } from "@/lib/types";
 import { Button, Provider, Text } from "@ant-design/react-native";
@@ -34,7 +34,7 @@ const mapHTML = `
     function setDevice(d) {
       layers.forEach(function(l) { map.removeLayer(l); });
       layers = [];
-      var lat = d.latitude, lon = d.longitude, range = d.range_meter;
+      var lat = d.latitude, lon = d.longitude, range = ${GEOFENCE_RADIUS_M};
       var icon = L.divIcon({
         className: '',
         html: '<div style="background:#1d4ed8;color:#fff;padding:2px 6px;border-radius:4px;font-size:11px;">장치</div>',

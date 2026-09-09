@@ -170,7 +170,7 @@ export default function HomeScreen() {
               <View style={{ gap: 2 }}>
                 <Text style={styles.setupBannerTitle}>위치 설정이 완료되지 않았습니다</Text>
                 <Text style={styles.setupBannerUuid} numberOfLines={1}>
-                  {unconfiguredLocationDevice.device_uuid}
+                  {unconfiguredLocationDevice.device_uuid.slice(0, 8)}…
                 </Text>
               </View>
             </View>
@@ -212,9 +212,11 @@ export default function HomeScreen() {
                       <Text style={[styles.cardPrimary, { color: colors.text }]} numberOfLines={1}>
                         {device.device_nickname || `${device.device_uuid.slice(0, 8)}...`}
                       </Text>
-                      <Text style={[styles.cardSecondary, { color: colors.icon }]} numberOfLines={1}>
-                        {device.device_uuid}
-                      </Text>
+                      {!!device.device_nickname && (
+                        <Text style={[styles.cardSecondary, { color: colors.icon }]} numberOfLines={1}>
+                          {device.device_uuid.slice(0, 8)}…
+                        </Text>
+                      )}
                       {!device.auth_token && (
                         <View style={styles.tokenWarnRow}>
                           <MaterialCommunityIcons name="key-alert-outline" size={11} color="#D97706" />
@@ -413,6 +415,7 @@ const styles = StyleSheet.create({
   },
   cardSecondary: {
     fontSize: 11,
+    fontFamily: "monospace",
   },
   roleChip: {
     flexDirection: "row",
