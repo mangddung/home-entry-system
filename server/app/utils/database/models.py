@@ -96,7 +96,6 @@ class DeviceLocation(Base):
     device_uuid  = Column(String(50), ForeignKey("device_management.device_uuid", ondelete="CASCADE"), primary_key=True)
     latitude     = Column(Float, nullable=False)
     longitude    = Column(Float, nullable=False)
-    range_meter  = Column(Float, nullable=False)
 
     device = relationship("DeviceManagement", back_populates="location")
 

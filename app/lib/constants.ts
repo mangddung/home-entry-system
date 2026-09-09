@@ -26,3 +26,7 @@ export const FCM_NOTIFICATIONS_LAST_READ_AT_KEY = "fcm_notifications_last_read_a
 
 // 서버(server/app/utils/device_utils.py의 MAX_DEVICES_PER_USER)와 값 맞출 것
 export const MAX_DEVICES_PER_USER = 20;
+
+// Android Geofencing API는 반경 100m 미만을 신뢰성 있게 판정하지 못해 진입 자체가 누락된다.
+// 그래서 반경은 사용자가 고르지 않고 이 값으로 고정하고, 실제 근접 판정은 BLE 스캔이 담당한다.
+export const GEOFENCE_RADIUS_M = 150;

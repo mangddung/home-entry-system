@@ -39,4 +39,13 @@ def init_db():
             conn.execute(text("ALTER TABLE device_management ADD COLUMN current_jti VARCHAR(36)"))
             conn.commit()
 
+    # geofence 반경은 앱에서 상수로 고정되어 더 이상 저장하지 않는다.
+    # 컬럼이 NOT NULL로 남아 있으면 모델에서 빠진 뒤 INSERT가 실패하므로 제거한다.
+    # (SQLite 3.35+ 의 DROP COLUMN 필요)
+    location_cols = {c["name"] for c in inspect(engine).get_columns("device_location")}
+    if "range_meter" in location_cols:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE device_location DROP COLUMN range_meter"))
+            conn.commit()
+
     Session = sessionmaker(bind=engine)

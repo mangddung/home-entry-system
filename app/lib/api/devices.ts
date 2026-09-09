@@ -156,7 +156,6 @@ export const fetchDeviceLocation = async (
   dev_uuid: string,
   lat: number,
   long: number,
-  range: number,
   nickname: string,
 ) => {
   const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
@@ -170,7 +169,6 @@ export const fetchDeviceLocation = async (
         device_uuid: dev_uuid,
         latitude: lat,
         longitude: long,
-        range_meter: range,
         device_nickname: nickname,
       },
       { headers: { Authorization: `Bearer ${access_token}` } },

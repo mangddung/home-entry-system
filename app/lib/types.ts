@@ -18,7 +18,6 @@ export type IoTDevice = {
   location: {
     latitude: number;
     longitude: number;
-    range_meter: number;
   } | null;
   last_ping_at: Date;
 };

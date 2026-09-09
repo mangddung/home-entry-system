@@ -99,7 +99,6 @@ def get_user_devices():
                 "location": {
                     "latitude":    m.device.location.latitude    if m.device.location else None,
                     "longitude":   m.device.location.longitude   if m.device.location else None,
-                    "range_meter": m.device.location.range_meter if m.device.location else None,
                 },
                 "last_ping_at": m.device.last_ping_at.isoformat() + "Z" if m.device.last_ping_at else None,
             }
@@ -131,7 +130,6 @@ def get_setup_uuid():
             "location": {
                 "latitude":    None,
                 "longitude":   None,
-                "range_meter": None,
             },
             "last_ping_at": None,
         }
@@ -203,11 +201,10 @@ def get_device_location():
     try:
         latitude    = float(data.get("latitude", 0))
         longitude   = float(data.get("longitude", 0))
-        range_meter = float(data.get("range_meter", 0))
     except (ValueError, TypeError):
         return jsonify({"status": "error", "message": "invalid payload"}), 400
 
-    if not device_uuid or not latitude or not longitude or not range_meter:
+    if not device_uuid or not latitude or not longitude:
         return jsonify({"status": "error", "message": "invalid payload"}), 400
 
     with _db.Session() as session:
@@ -227,7 +224,6 @@ def get_device_location():
                 device_uuid = device_uuid,
                 latitude = latitude,
                 longitude = longitude,
-                range_meter = range_meter
             )
             session.add(new_location)
             session.commit()
@@ -237,7 +233,6 @@ def get_device_location():
         else:
             device_location.latitude = latitude
             device_location.longitude = longitude
-            device_location.range_meter = range_meter
             session.commit()
             
             log_activity("device_location_updated", user_uuid=user_uuid, device_uuid=device_uuid)
