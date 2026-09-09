@@ -2,6 +2,7 @@ import { AlertButton, CustomAlert } from "@/components/custom-alert";
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { deleteDevice, deleteMemberShip, updateDeviceName } from "@/lib/api/devices";
+import { unbondDevice } from "@/lib/bond";
 import { fetchDeviceLogs, type DeviceLog } from "@/lib/api/logs";
 import { userTokenExchange } from "@/lib/ble";
 import {
@@ -1139,6 +1140,7 @@ export default function DeviceInfoView() {
                       : await deleteMemberShip(device.device_uuid);
                   setIsDeleting(false);
                   if (result?.type === "success") {
+                    await unbondDevice(device.device_uuid);
                     setDeleteVisible(false);
                     router.push("/home");
                   } else {
