@@ -164,7 +164,8 @@ static bool apply_auth_response(const char *json)
 // device_uuid + secret_key via /iot/reauth. Updates g_cfg + NVS on success.
 static bool device_reauthenticate(void)
 {
-    char resp_body[512];
+    // access_token(CFG_TOKEN_LEN) + refresh_token(CFG_REFRESH_LEN) + JSON overhead
+    char resp_body[CFG_TOKEN_LEN + CFG_REFRESH_LEN + 128];
 
     if (g_cfg.refresh_token[0] != '\0') {
         char body[CFG_REFRESH_LEN + 32];
@@ -235,6 +236,9 @@ static void task_iot_init(void *arg)
         esp_err_t err = esp_http_client_perform(client);
         status = 0;
         if (err == ESP_OK) status = esp_http_client_get_status_code(client);
+        // esp_http_client는 401 응답을 자동 인증 처리 시도하다 auth_type 미설정이면
+        // ESP_ERR_NOT_SUPPORTED로 삼켜버려 status가 0으로 남는다 → 401로 취급.
+        else if (err == ESP_ERR_NOT_SUPPORTED) status = 401;
         else ESP_LOGE(TAG, "HTTP error: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
 
@@ -332,6 +336,7 @@ static void task_validate_token(void *arg)
         esp_err_t err = esp_http_client_perform(client);
         status = 0;
         if (err == ESP_OK) status = esp_http_client_get_status_code(client);
+        else if (err == ESP_ERR_NOT_SUPPORTED) status = 401;
         else ESP_LOGE(TAG, "HTTP error: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
 
@@ -396,6 +401,7 @@ static void task_ping(void *arg)
             esp_err_t err = esp_http_client_perform(client);
             status = 0;
             if (err == ESP_OK) status = esp_http_client_get_status_code(client);
+            else if (err == ESP_ERR_NOT_SUPPORTED) status = 401;
             else ESP_LOGE(TAG, "Ping failed: %s", esp_err_to_name(err));
             esp_http_client_cleanup(client);
 
@@ -434,14 +440,23 @@ void http_notify_reset(void)
     char body[128];
     snprintf(body, sizeof(body), "{\"device_uuid\":\"%s\"}", IOT_DEVICE_UUID);
 
+    // /iot/reset은 새 access/refresh 토큰을 발급하고 서버의 current_jti를 갱신한다.
+    // 응답을 저장하지 않으면 기기 토큰이 서버와 영구히 어긋나 재설정이 401로 막힌다.
+    char resp_body[CFG_TOKEN_LEN + CFG_REFRESH_LEN + 128] = {0};
+
     for (int i = 0; i < 2; i++) {
         if (i > 0) vTaskDelay(pdMS_TO_TICKS(2000));
+
+        resp_body[0] = '\0';
+        resp_buf_t rb = { .buf = resp_body, .size = sizeof(resp_body), .len = 0 };
 
         esp_http_client_config_t cfg = {
             .url                   = HA_RESET_URL,
             .method                = HTTP_METHOD_POST,
             .timeout_ms            = HTTP_TIMEOUT_MS,
             .disable_auto_redirect = true,
+            .event_handler         = http_event_cb,
+            .user_data             = &rb,
             .buffer_size_tx        = CFG_TOKEN_LEN + 256,
             .crt_bundle_attach     = esp_crt_bundle_attach,
         };
@@ -454,11 +469,15 @@ void http_notify_reset(void)
         esp_err_t err = esp_http_client_perform(client);
         int status = 0;
         if (err == ESP_OK) status = esp_http_client_get_status_code(client);
+        else if (err == ESP_ERR_NOT_SUPPORTED) status = 401;
         else ESP_LOGE(TAG, "reset attempt %d failed: %s", i + 1, esp_err_to_name(err));
         esp_http_client_cleanup(client);
         ESP_LOGI(TAG, "reset HTTP %d (attempt %d/2)", status, i + 1);
 
-        if (status == 200) break;  // 성공 시 바로 반환
+        if (status == 200) {
+            apply_auth_response(resp_body);  // 새 토큰을 NVS에 저장
+            break;
+        }
     }
 }
 
@@ -487,7 +506,7 @@ void http_request_validate_token(const char *user_uuid,
 
 void http_start_ping_task(void)
 {
-    xTaskCreate(task_ping, "http_ping", 4096, NULL, 4, NULL);
+    xTaskCreate(task_ping, "http_ping", 6144, NULL, 4, NULL);
 }
 
 int http_validate_setup(const char *setup_token, const char *user_uuid)
@@ -501,43 +520,50 @@ int http_validate_setup(const char *setup_token, const char *user_uuid)
         return 0;
     }
 
-    char resp_body[640] = {0};
-    resp_buf_t rb = { .buf = resp_body, .size = sizeof(resp_body), .len = 0 };
-
+    // access_token(CFG_TOKEN_LEN) + refresh_token(CFG_REFRESH_LEN) + JSON overhead
+    char resp_body[CFG_TOKEN_LEN + CFG_REFRESH_LEN + 128] = {0};
     char auth_header[CFG_TOKEN_LEN + 8];
-    snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_cfg.device_token);
-
-    esp_http_client_config_t cfg = {
-        .url                   = HA_VALIDATE_SETUP_URL,
-        .method                = HTTP_METHOD_POST,
-        .timeout_ms            = HTTP_TIMEOUT_MS,
-        .disable_auto_redirect = true,
-        .event_handler         = http_event_cb,
-        .user_data             = &rb,
-        .buffer_size_tx        = CFG_TOKEN_LEN + 256,
-        .crt_bundle_attach     = esp_crt_bundle_attach,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    esp_http_client_set_header(client, "Content-Type",  "application/json");
-    esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
-    esp_http_client_set_header(client, "Authorization", auth_header);
-    esp_http_client_set_post_field(client, body, (int)strlen(body));
-
-    esp_err_t err = esp_http_client_perform(client);
     int status = 0;
-    if (err == ESP_OK) status = esp_http_client_get_status_code(client);
-    else ESP_LOGE(TAG, "validate_setup request failed: %s", esp_err_to_name(err));
-    esp_http_client_cleanup(client);
+
+    // 401이면 secret_key로 재인증 후 1회 재시도한다. 기기 토큰이 서버의
+    // current_jti와 어긋난 상태(예: 리셋 중 토큰 회전을 놓친 경우)를 자동 복구한다.
+    for (int attempt = 0; attempt < 2; attempt++) {
+        resp_body[0] = '\0';
+        resp_buf_t rb = { .buf = resp_body, .size = sizeof(resp_body), .len = 0 };
+        snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_cfg.device_token);
+
+        esp_http_client_config_t cfg = {
+            .url                   = HA_VALIDATE_SETUP_URL,
+            .method                = HTTP_METHOD_POST,
+            .timeout_ms            = HTTP_TIMEOUT_MS,
+            .disable_auto_redirect = true,
+            .event_handler         = http_event_cb,
+            .user_data             = &rb,
+            .buffer_size_tx        = CFG_TOKEN_LEN + 256,
+            .crt_bundle_attach     = esp_crt_bundle_attach,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        esp_http_client_set_header(client, "Content-Type",  "application/json");
+        esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
+        esp_http_client_set_header(client, "Authorization", auth_header);
+        esp_http_client_set_post_field(client, body, (int)strlen(body));
+
+        esp_err_t err = esp_http_client_perform(client);
+        status = 0;
+        if (err == ESP_OK) status = esp_http_client_get_status_code(client);
+        else if (err == ESP_ERR_NOT_SUPPORTED) status = 401;
+        else ESP_LOGE(TAG, "validate_setup request failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+
+        if (status == 401 && attempt == 0 && device_reauthenticate()) {
+            ESP_LOGI(TAG, "validate_setup: retrying after reauth");
+            continue;
+        }
+        break;
+    }
 
     if (status == 200) {
-        cJSON *root = cJSON_Parse(resp_body);
-        if (root) {
-            cJSON *data  = cJSON_GetObjectItemCaseSensitive(root, "data");
-            cJSON *token = data ? cJSON_GetObjectItemCaseSensitive(data, "device_token") : NULL;
-            if (cJSON_IsString(token) && token->valuestring[0] != '\0')
-                device_config_set_token(token->valuestring);
-            cJSON_Delete(root);
-        }
+        apply_auth_response(resp_body);
     }
 
     ESP_LOGI(TAG, "validate_setup HTTP %d", status);

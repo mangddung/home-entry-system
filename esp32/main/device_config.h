@@ -2,7 +2,7 @@
 #include <stdbool.h>
 
 #define CFG_UUID_LEN    37   // 36 hex chars + NUL
-#define CFG_TOKEN_LEN   512  // JWT can be several hundred chars
+#define CFG_TOKEN_LEN   768  // JWT can be several hundred chars (jti/exp 추가로 573자까지 관측됨)
 #define CFG_REFRESH_LEN 96   // secrets.token_urlsafe(48) ~= 64 chars + headroom
 #define CFG_SSID_LEN    33   // 32 chars + NUL
 #define CFG_PW_LEN      65   // 64 chars + NUL
