@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "esp_mac.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "freertos/FreeRTOS.h"
@@ -253,6 +254,34 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
     { 0 }, // terminator
 };
 
+// ── Device name ───────────────────────────────────────────────────────────────
+// "doorl-" + device_uuid 앞 8자. 31바이트 광고 페이로드에 128bit UUID와 함께
+// 넣을 수 없어 이름은 scan response로 보낸다.
+static char s_dev_name[16];
+
+static void build_dev_name(void)
+{
+    if (IOT_DEVICE_UUID[0] != 0) {
+        snprintf(s_dev_name, sizeof(s_dev_name), BLE_DEVICE_NAME_PREFIX "%.8s", IOT_DEVICE_UUID);
+    } else {
+        // 아직 uuid가 없는 기기(미플래시/셋업 전)는 MAC 뒤 3바이트로 구분한다.
+        uint8_t mac[6] = {0};
+        esp_read_mac(mac, ESP_MAC_BT);
+        snprintf(s_dev_name, sizeof(s_dev_name), BLE_DEVICE_NAME_PREFIX "%02x%02x%02x",
+                 mac[3], mac[4], mac[5]);
+    }
+}
+
+static void adv_set_name_rsp(void)
+{
+    struct ble_hs_adv_fields rsp = {
+        .name             = (const uint8_t *)s_dev_name,
+        .name_len         = strlen(s_dev_name),
+        .name_is_complete = 1,
+    };
+    ble_gap_adv_rsp_set_fields(&rsp);
+}
+
 // ── Advertising ───────────────────────────────────────────────────────────────
 #define ADV_DURATION_MS  60000
 #define ADV_PAUSE_MS     3000
@@ -267,14 +296,12 @@ static void adv_pause_task(void *arg)
         };
         struct ble_hs_adv_fields fields = {
             .flags              = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
-            .name               = (const uint8_t *)BLE_DEVICE_NAME,
-            .name_len           = strlen(BLE_DEVICE_NAME),
-            .name_is_complete   = 1,
             .uuids128           = &s_svc_uuid,
             .num_uuids128       = 1,
             .uuids128_is_complete = 1,
         };
         ble_gap_adv_set_fields(&fields);
+        adv_set_name_rsp();
         ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, ADV_DURATION_MS,
                           &params, gap_event_handler, NULL);
         ESP_LOGI(TAG, "BLE advertising (6s)");
@@ -290,14 +317,12 @@ static void ble_advertise(void)
     };
     struct ble_hs_adv_fields fields = {
         .flags              = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
-        .name               = (const uint8_t *)BLE_DEVICE_NAME,
-        .name_len           = strlen(BLE_DEVICE_NAME),
-        .name_is_complete   = 1,
         .uuids128           = &s_svc_uuid,
         .num_uuids128       = 1,
         .uuids128_is_complete = 1,
     };
     ble_gap_adv_set_fields(&fields);
+    adv_set_name_rsp();
     ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, ADV_DURATION_MS,
                       &params, gap_event_handler, NULL);
     ESP_LOGI(TAG, "BLE advertising (3s) svc=%s read=%s write=%s mfr=%s",
@@ -433,7 +458,8 @@ void ble_server_init(void)
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
-    ESP_ERROR_CHECK(ble_svc_gap_device_name_set(BLE_DEVICE_NAME));
+    build_dev_name();
+    ESP_ERROR_CHECK(ble_svc_gap_device_name_set(s_dev_name));
     ESP_ERROR_CHECK(ble_gatts_count_cfg(s_gatt_svcs));
     ESP_ERROR_CHECK(ble_gatts_add_svcs(s_gatt_svcs));
 
@@ -804,14 +830,12 @@ static void setup_ble_advertise(void)
     };
     struct ble_hs_adv_fields fields = {
         .flags              = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
-        .name               = (const uint8_t *)BLE_DEVICE_NAME,
-        .name_len           = strlen(BLE_DEVICE_NAME),
-        .name_is_complete   = 1,
         .uuids128           = &s_setup_svc_uuid,
         .num_uuids128       = 1,
         .uuids128_is_complete = 1,
     };
     ble_gap_adv_set_fields(&fields);
+    adv_set_name_rsp();
     ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, BLE_HS_FOREVER,
                       &params, setup_gap_event_handler, NULL);
     ESP_LOGI(TAG, "BLE setup advertising (continuous)");
@@ -841,7 +865,8 @@ void ble_setup_server_init(void)
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
-    ESP_ERROR_CHECK(ble_svc_gap_device_name_set(BLE_DEVICE_NAME));
+    build_dev_name();
+    ESP_ERROR_CHECK(ble_svc_gap_device_name_set(s_dev_name));
     ESP_ERROR_CHECK(ble_gatts_count_cfg(s_setup_gatt_svcs));
     ESP_ERROR_CHECK(ble_gatts_add_svcs(s_setup_gatt_svcs));
 

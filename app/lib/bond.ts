@@ -12,7 +12,11 @@ const supported = Platform.OS === "android" && !!BleBond;
 
 const MAP_KEY = "ble_bond_map"; // { [device_uuid]: mac }
 const PENDING_KEY = "ble_bond_pending"; // 셋업 진행 중인 mac
-const DEVICE_NAME = "DoorLock"; // esp32/main/app_config.h의 BLE_DEVICE_NAME
+// esp32/main/app_config.h의 BLE_DEVICE_NAME_PREFIX. "DoorLock"은 구버전 펌웨어 잔재 정리용.
+const DEVICE_NAME_PREFIX = "doorl-";
+const LEGACY_DEVICE_NAME = "DoorLock";
+const isOurDevice = (name: string | null) =>
+  !!name && (name.startsWith(DEVICE_NAME_PREFIX) || name === LEGACY_DEVICE_NAME);
 
 const readMap = async (): Promise<Record<string, string>> => {
   const raw = await AsyncStorage.getItem(MAP_KEY);
@@ -87,12 +91,12 @@ export const sweepOrphanBonds = async () => {
   }
   await writeMap(map);
 
-  // 매핑이 없는 잔재 본딩(구버전/재설정 흔적)까지 정리. DoorLock 이름만 건드린다.
+  // 매핑이 없는 잔재 본딩(구버전/재설정 흔적)까지 정리. 우리 기기 이름만 건드린다.
   const keep = new Set(Object.values(map));
   const pending = await AsyncStorage.getItem(PENDING_KEY);
   if (pending) keep.add(pending);
   const bonded = await BleBond!.bondedDevices().catch(() => []);
   for (const b of bonded) {
-    if (b.name === DEVICE_NAME && !keep.has(b.address)) await remove(b.address);
+    if (isOurDevice(b.name) && !keep.has(b.address)) await remove(b.address);
   }
 };

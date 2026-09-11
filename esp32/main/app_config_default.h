@@ -27,7 +27,8 @@
 #define SETUP_READ_UUID    "66b21c2d-75ed-4eb2-83ee-dd71e524438d"
 
 // ── BLE ───────────────────────────────────────────────────────────────────────
-#define BLE_DEVICE_NAME "DoorLock"
+// 광고 이름은 "doorl-<device_uuid 앞 8자>" 형태로 런타임에 생성한다(ble_server.c).
+#define BLE_DEVICE_NAME_PREFIX "doorl-"
 
 // Dynamic BLE UUID defaults (runtime values live in device_config_t g_cfg)
 #define BLE_SVC_UUID_DEFAULT      ""
