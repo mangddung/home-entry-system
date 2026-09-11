@@ -1,7 +1,7 @@
 import { AlertButton, CustomAlert } from "@/components/custom-alert";
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
-import { deleteDevice, deleteMemberShip, updateDeviceName } from "@/lib/api/devices";
+import { deleteDevice, deleteMemberShip, fetchDevices, loadDevices, updateDeviceName } from "@/lib/api/devices";
 import { unbondDevice } from "@/lib/bond";
 import { fetchDeviceLogs, type DeviceLog } from "@/lib/api/logs";
 import { userTokenExchange } from "@/lib/ble";
@@ -16,9 +16,11 @@ import {
   fetchMember,
 } from "@/lib/api/members";
 import { GEOFENCE_RADIUS_M, SELECTED_DEVICE_KEY, USER_UUID_KEY } from "@/lib/constants";
+import type { ScheduleWindow } from "@/lib/schedule";
 import { getTokenSecure } from "@/lib/token-storage";
 import { MemberInfo, type IoTDevice } from "@/lib/types";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useIsFocused } from "@react-navigation/native";
 import Clipboard from "@react-native-clipboard/clipboard";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { router } from "expo-router";
@@ -35,10 +37,13 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
+
+const unitToMinutes = { 분: 1, 시: 60, 일: 1440 };
 
 const mapHTML = `
 <!DOCTYPE html>
@@ -120,8 +125,27 @@ function getTimeLeft(expiredAt: string) {
   const diff = new Date(expiredAt).getTime() - Date.now();
   if (diff <= 0) return "만료됨";
   const hours = Math.floor(diff / (1000 * 60 * 60));
+  if (hours < 1) {
+    const minutes = Math.floor(diff / (1000 * 60));
+    return minutes < 1 ? "1분 이내 만료" : `${minutes}분 후 만료`;
+  }
   if (hours < 24) return `${hours}시간 후 만료`;
   return `${Math.floor(hours / 24)}일 후 만료`;
+}
+
+// 배지의 "n일 후 만료"를 탭했을 때 보여줄 정확한 잔여 시간
+function getExactTimeLeft(expiredAt: string) {
+  const diff = new Date(expiredAt).getTime() - Date.now();
+  if (diff <= 0) return "이미 만료되었습니다.";
+  const minutes = Math.floor(diff / (1000 * 60));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  const parts = [];
+  if (days) parts.push(`${days}일`);
+  if (hours) parts.push(`${hours}시간`);
+  parts.push(`${mins}분`);
+  return `${parts.join(" ")} 남음`;
 }
 
 function getExpiredBadgeStyle(expiredAt: string, isDark: boolean) {
@@ -130,6 +154,103 @@ function getExpiredBadgeStyle(expiredAt: string, isDark: boolean) {
   if (diff < 12 * 3600 * 1000)
     return { bg: isDark ? "rgba(245,158,11,0.15)" : "#FEF3C7", color: "#F59E0B" };
   return { bg: isDark ? "rgba(34,197,94,0.15)" : "#DCFCE7", color: "#16A34A" };
+}
+
+const DAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+const DAY_LABEL: Record<string, string> = {
+  mon: "월", tue: "화", wed: "수", thu: "목", fri: "금", sat: "토", sun: "일",
+  weekday: "평일", weekend: "주말",
+};
+
+const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"];
+const WEEKEND = ["sat", "sun"];
+
+const deviceTimeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+// 요일 배열을 사람이 읽는 문구로. 평일/주말 전체면 프리셋 이름으로 묶는다.
+function formatDays(days: string[]) {
+  const rest = [...days];
+  const parts: string[] = [];
+  for (const [preset, group] of [["평일", WEEKDAYS], ["주말", WEEKEND]] as const) {
+    if (group.every((d) => rest.includes(d))) {
+      parts.push(preset);
+      group.forEach((d) => rest.splice(rest.indexOf(d), 1));
+    }
+  }
+  const ordered = DAY_ORDER.filter((d) => rest.includes(d)).map((d) => DAY_LABEL[d]);
+  return [...parts, ...ordered, ...rest.filter((d) => !DAY_ORDER.includes(d as never)).map((d) => DAY_LABEL[d] ?? d)].join("·");
+}
+
+function describeSchedule(schedule: { windows: ScheduleWindow[] } | null, tz: string | null) {
+  if (!schedule?.windows?.length) return null;
+  const body = schedule.windows
+    .map(
+      (w) =>
+        `${formatDays(w.days)} ${w.start}~${w.end} 하루 ${w.max_uses}회`,
+    )
+    .join(" / ");
+  return tz ? `${body} (${tz})` : body;
+}
+
+// 서버 schedule.find_overlap과 같은 규칙. 겹치면 먼저 등록된 시간대만 적용돼
+// 뒤 시간대가 가려지므로 발급 전에 막는다. (서버도 400으로 한 번 더 막는다)
+function findOverlap(windows: ScheduleWindow[]): [ScheduleWindow, ScheduleWindow] | null {
+  const WEEK = 7 * 1440;
+  const toMin = (hhmm: string) => {
+    const [h, m] = hhmm.split(":").map((v) => parseInt(v, 10));
+    return h * 60 + m;
+  };
+  const intervals = (w: ScheduleWindow) => {
+    const s = toMin(w.start);
+    const duration = ((toMin(w.end) - s + 1440) % 1440) || 1440;
+    const days = new Set(
+      w.days.flatMap((d) => (d === "weekday" ? WEEKDAYS : d === "weekend" ? WEEKEND : [d])),
+    );
+    return [...days].flatMap((d) => {
+      const start = DAY_ORDER.indexOf(d as (typeof DAY_ORDER)[number]) * 1440 + s;
+      const end = start + duration;
+      return end <= WEEK ? [[start, end]] : [[start, WEEK], [0, end - WEEK]];
+    });
+  };
+  for (let i = 0; i < windows.length; i++) {
+    for (let j = i + 1; j < windows.length; j++) {
+      const a = intervals(windows[i]);
+      const b = intervals(windows[j]);
+      if (a.some(([sa, ea]) => b.some(([sb, eb]) => sa < eb && sb < ea))) {
+        return [windows[i], windows[j]];
+      }
+    }
+  }
+  return null;
+}
+
+// 스케줄 토큰은 누적보다 "오늘 몇 번 남았나"가 의미 있으므로 오늘 회차 기준으로 보여준다.
+// 오늘 = 발급 시간대 기준 날짜(서버 계산). 전체 횟수 제한을 걸었으면 뒤에 덧붙인다.
+function tokenUsageLabel(t: {
+  use_count: number;
+  max_uses: number | null;
+  schedule: { windows: ScheduleWindow[] } | null;
+  today: { uses: number; max_uses: number } | null;
+}) {
+  if (!t.schedule) return `사용 ${t.use_count} / ${t.max_uses ?? "∞"}`;
+  const today = !t.today
+    ? ""
+    : t.today.max_uses > 0
+      ? `오늘 ${t.today.uses} / ${t.today.max_uses}`
+      : "오늘은 사용 시간대 없음";
+  const total = t.max_uses != null ? `전체 ${t.use_count} / ${t.max_uses}` : "";
+  return [today, total].filter(Boolean).join(" · ");
+}
+
+function hhmmToDate(hhmm: string) {
+  const [h, m] = hhmm.split(":").map((v) => parseInt(v, 10));
+  const d = new Date();
+  d.setHours(h || 0, m || 0, 0, 0);
+  return d;
+}
+
+function dateToHhmm(d: Date) {
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 function getRoleStyle(role: string, isDark: boolean) {
@@ -173,6 +294,8 @@ export default function DeviceInfoView() {
   const cardBorder = isDark ? "#2C3237" : "#E2E8F0";
   const modalBg = isDark ? "#1E2124" : "#FFFFFF";
 
+  const isFocused = useIsFocused();
+
   const [myUuid, setMyUuid] = useState<string | null>(null);
   const [device, setDevice] = useState<IoTDevice | null>(null);
   const [deviceMember, setDeviceMember] = useState<MemberInfo[]>([]);
@@ -201,6 +324,7 @@ export default function DeviceInfoView() {
   const [isLogLoading, setIsLogLoading] = useState(false);
 
   const [inviteRole, setInviteRole] = useState<"member" | "guest">("member");
+  const [inviteWithToken, setInviteWithToken] = useState(false);
 
   const [isNicknameModalOpen, setIsNicknameModalOpen] = useState(false);
   const [nicknameInput, setNicknameInput] = useState("");
@@ -210,19 +334,33 @@ export default function DeviceInfoView() {
   const [guestTokenExpireValue, setGuestTokenExpireValue] = useState("3");
   const [guestTokenExpireUnit, setGuestTokenExpireUnit] = useState<"분" | "시" | "일">("일");
   const [guestTokenShowExtra, setGuestTokenShowExtra] = useState(false);
+  const { height: windowHeight } = useWindowDimensions();
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  // 스케줄을 켜면 창별 횟수가 한도 역할을 하므로 전체 횟수는 기본 무제한이다.
+  const [scheduleTotalLimit, setScheduleTotalLimit] = useState(false);
+  const [scheduleWindows, setScheduleWindows] = useState<ScheduleWindow[]>([]);
+  const [schedulePicker, setSchedulePicker] = useState<{ id: number; field: "start" | "end" } | null>(
+    null,
+  );
   const [guestTokenNotBeforeDate, setGuestTokenNotBeforeDate] = useState<Date | null>(null);
   const [guestTokenPickerStep, setGuestTokenPickerStep] = useState<"date" | "time" | null>(null);
   const [guestTokenLoading, setGuestTokenLoading] = useState(false);
   const [selectedMember, setSelectedMember] = useState<MemberInfo | null>(null);
   const [selectedMemberTokens, setSelectedMemberTokens] = useState<{
     id: number;
+    is_active: boolean;
     max_uses: number | null;
     use_count: number;
     not_before: string | null;
     expired_at: string | null;
     created_at: string | null;
+    schedule: { windows: ScheduleWindow[] } | null;
+    schedule_tz: string | null;
+    today: { uses: number; max_uses: number } | null;
   }[]>([]);
   const [selectedMemberTokensLoading, setSelectedMemberTokensLoading] = useState(false);
+  const [myTokens, setMyTokens] = useState<typeof selectedMemberTokens>([]);
+  const [myTokensLoading, setMyTokensLoading] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
 
   const [isActivityLogOpen, setIsActivityLogOpen] = useState(false);
@@ -270,8 +408,11 @@ export default function DeviceInfoView() {
     }
   };
 
-  const handleGuestTokenClose = () => {
-    setGuestTokenTarget(null);
+  const handleGuestTokenReset = () => {
+    setScheduleEnabled(false);
+    setScheduleTotalLimit(false);
+    setScheduleWindows([]);
+    setSchedulePicker(null);
     setGuestTokenMaxUses(1);
     setGuestTokenExpireValue("3");
     setGuestTokenExpireUnit("일");
@@ -280,20 +421,44 @@ export default function DeviceInfoView() {
     setGuestTokenPickerStep(null);
   };
 
+  const handleGuestTokenClose = () => {
+    setGuestTokenTarget(null);
+    handleGuestTokenReset();
+  };
+
   const handleGuestTokenConfirm = async () => {
     if (!device || !guestTokenTarget) return;
+    if (scheduleEnabled) {
+      if (scheduleWindows.length === 0) {
+        showAlert("확인", "사용 시간대를 하나 이상 추가하세요.");
+        return;
+      }
+      if (scheduleWindows.some((w) => w.days.length === 0)) {
+        showAlert("확인", "요일을 선택하지 않은 시간대가 있습니다.");
+        return;
+      }
+      const overlap = findOverlap(scheduleWindows);
+      if (overlap) {
+        const label = (w: ScheduleWindow) => `${formatDays(w.days)} ${w.start}~${w.end}`;
+        showAlert(
+          "확인",
+          `시간대가 서로 겹칩니다.\n${label(overlap[0])}\n${label(overlap[1])}`,
+        );
+        return;
+      }
+    }
     setGuestTokenLoading(true);
-    const unitToMinutes = { 분: 1, 시: 60, 일: 1440 };
     const expire_minutes = guestTokenExpireValue
       ? parseInt(guestTokenExpireValue, 10) * unitToMinutes[guestTokenExpireUnit]
       : undefined;
-    console;
     const result = await createGuestToken(
       device.device_uuid,
       guestTokenTarget.user_uuid,
-      guestTokenMaxUses || undefined,
+      scheduleEnabled && !scheduleTotalLimit ? undefined : guestTokenMaxUses || undefined,
       guestTokenNotBeforeDate?.toISOString() || undefined,
       expire_minutes,
+      scheduleEnabled ? { windows: scheduleWindows } : undefined,
+      scheduleEnabled ? deviceTimeZone() : undefined,
     );
     setGuestTokenLoading(false);
     if (result.type === "success") {
@@ -305,6 +470,9 @@ export default function DeviceInfoView() {
   };
 
   const [deleteVisible, setDeleteVisible] = useState(false);
+  const [leaveCountdown, setLeaveCountdown] = useState(0);
+  // 만료까지 남은 시간 표시를 30초마다 갱신한다(getTimeLeft는 렌더 시점에 계산된다).
+  const [, setExpiryTick] = useState(0);
   const [confirmInput, setConfirmInput] = useState("");
   const [isDeleting, setIsDeleting] = useState(false);
 
@@ -374,7 +542,16 @@ export default function DeviceInfoView() {
 
   const handleOk = async () => {
     if (!device) return;
-    const result = await createInviteCode(device.device_uuid, displayName, inviteRole);
+    const tokenOptions =
+      inviteRole === "guest" && inviteWithToken
+        ? {
+            token_max_uses: guestTokenMaxUses || 1,
+            token_expire_minutes:
+              (parseInt(guestTokenExpireValue, 10) || 3) * unitToMinutes[guestTokenExpireUnit],
+            token_not_before: guestTokenNotBeforeDate?.toISOString(),
+          }
+        : undefined;
+    const result = await createInviteCode(device.device_uuid, displayName, inviteRole, tokenOptions);
     if (result.type === "success") {
       const data = result.data as { display_name: string; invite_code: string };
       setInviteResult(data);
@@ -388,6 +565,8 @@ export default function DeviceInfoView() {
     setDisplayName("");
     setInviteResult(null);
     setInviteRole("member");
+    setInviteWithToken(false);
+    handleGuestTokenReset();
   };
 
   useEffect(() => {
@@ -405,6 +584,20 @@ export default function DeviceInfoView() {
       setIsLoading(false);
     })();
   }, []);
+
+  // 상세 화면에 머무는 동안에도 서버 상태(온라인 여부·위치)를 주기적으로 반영한다.
+  useEffect(() => {
+    if (!isFocused || !device) return;
+    const device_uuid = device.device_uuid;
+    const sync = async () => {
+      await fetchDevices();
+      const latest = (await loadDevices()).find((d) => d.device_uuid === device_uuid);
+      if (!latest) return;
+      setDevice((prev) => (JSON.stringify(prev) === JSON.stringify(latest) ? prev : latest));
+    };
+    const interval = setInterval(() => { void sync(); }, 30_000);
+    return () => clearInterval(interval);
+  }, [isFocused, device?.device_uuid]);
 
   useEffect(() => {
     void (async () => {
@@ -442,6 +635,476 @@ export default function DeviceInfoView() {
     })();
   }, [selectedMember]);
 
+  useEffect(() => {
+    const timer = setInterval(() => setExpiryTick((v) => v + 1), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // 마스터가 아니면 본인에게 발급된 토큰을 조회한다.
+  useEffect(() => {
+    if (!device || !myUuid || device.role === "master") {
+      setMyTokens([]);
+      return;
+    }
+    void (async () => {
+      setMyTokensLoading(true);
+      const result = await fetchGuestTokens(device.device_uuid, myUuid);
+      if (result.type === "success") {
+        setMyTokens(result.data as typeof myTokens);
+      }
+      setMyTokensLoading(false);
+    })();
+  }, [device?.device_uuid, device?.role, myUuid]);
+
+  const updateWindow = (id: number, patch: Partial<ScheduleWindow>) =>
+    setScheduleWindows((prev) => prev.map((w) => (w.id === id ? { ...w, ...patch } : w)));
+
+  // 평일/주말 칩은 태그가 아니라 실제 요일을 한꺼번에 넣고 뺀다.
+  const toggleWindowPreset = (id: number, group: string[]) =>
+    setScheduleWindows((prev) =>
+      prev.map((w) => {
+        if (w.id !== id) return w;
+        const all = group.every((d) => w.days.includes(d));
+        return {
+          ...w,
+          days: all
+            ? w.days.filter((d) => !group.includes(d))
+            : [...w.days, ...group.filter((d) => !w.days.includes(d))],
+        };
+      }),
+    );
+
+  const toggleWindowDay = (id: number, day: string) =>
+    setScheduleWindows((prev) =>
+      prev.map((w) =>
+        w.id === id
+          ? {
+              ...w,
+              days: w.days.includes(day) ? w.days.filter((d) => d !== day) : [...w.days, day],
+            }
+          : w,
+      ),
+    );
+
+  // 토큰 옵션 입력 UI – 게스트 토큰 발급 모달과 초대 코드 생성 모달이 공유한다.
+  // 스케줄은 초대 코드 경로(invite_codes)가 지원하지 않아 게스트 토큰 발급에서만 노출한다.
+  const hideTotalUses = (withSchedule: boolean) =>
+    withSchedule && scheduleEnabled && !scheduleTotalLimit;
+
+  const tokenOptionFields = (withSchedule: boolean) => (
+    <>
+            <View style={[styles.modalField, hideTotalUses(withSchedule) && { display: "none" }]}>
+              <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
+                {withSchedule && scheduleEnabled ? "총 사용 횟수" : "최대 사용 횟수 (기본 1)"}
+              </Text>
+              <View style={styles.stepperRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.stepperBtn,
+                    { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6", borderColor: cardBorder },
+                  ]}
+                  onPress={() => setGuestTokenMaxUses((v) => Math.max(1, v - 1))}
+                >
+                  <Text style={[styles.stepperBtnText, { color: colors.text }]}>−</Text>
+                </TouchableOpacity>
+                <Text
+                  style={[
+                    styles.stepperValue,
+                    {
+                      color: colors.text,
+                      borderColor: cardBorder,
+                      backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
+                    },
+                  ]}
+                >
+                  {guestTokenMaxUses}
+                </Text>
+                <TouchableOpacity
+                  style={[
+                    styles.stepperBtn,
+                    { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6", borderColor: cardBorder },
+                  ]}
+                  onPress={() => setGuestTokenMaxUses((v) => v + 1)}
+                >
+                  <Text style={[styles.stepperBtnText, { color: colors.text }]}>+</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+            <View style={styles.modalField}>
+              <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
+                만료 시간 (기본 3일)
+              </Text>
+              <View style={styles.expireRow}>
+                <TextInput
+                  style={[
+                    styles.modalInput,
+                    {
+                      flex: 1,
+                      color: colors.text,
+                      backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
+                      borderColor: cardBorder,
+                    },
+                  ]}
+                  placeholder="3"
+                  placeholderTextColor={colors.tabIconDefault}
+                  value={guestTokenExpireValue}
+                  onChangeText={setGuestTokenExpireValue}
+                  keyboardType="numeric"
+                />
+                <View style={styles.unitSelector}>
+                  {(["분", "시", "일"] as const).map((unit) => (
+                    <TouchableOpacity
+                      key={unit}
+                      style={[
+                        styles.unitBtn,
+                        {
+                          borderColor: guestTokenExpireUnit === unit ? "#3B82F6" : cardBorder,
+                          backgroundColor:
+                            guestTokenExpireUnit === unit
+                              ? isDark
+                                ? "rgba(59,130,246,0.15)"
+                                : "#EFF6FF"
+                              : isDark
+                                ? "#2A2D31"
+                                : "#F9FAFB",
+                        },
+                      ]}
+                      onPress={() => setGuestTokenExpireUnit(unit)}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 13,
+                          fontWeight: "600",
+                          color:
+                            guestTokenExpireUnit === unit ? "#3B82F6" : colors.tabIconDefault,
+                        }}
+                      >
+                        {unit}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+            </View>
+
+            <TouchableOpacity
+              style={styles.extraToggle}
+              onPress={() => setGuestTokenShowExtra((v) => !v)}
+            >
+              <MaterialCommunityIcons
+                name={guestTokenShowExtra ? "chevron-up" : "chevron-down"}
+                size={16}
+                color={colors.tabIconDefault}
+              />
+              <Text style={[styles.extraToggleText, { color: colors.tabIconDefault }]}>
+                추가 옵션
+              </Text>
+            </TouchableOpacity>
+
+            {guestTokenShowExtra && (
+              <View style={styles.modalField}>
+                <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
+                  활성화 시작 시각 (기본 즉시)
+                </Text>
+                <TouchableOpacity
+                  style={[
+                    styles.datePickerBtn,
+                    {
+                      borderColor: guestTokenNotBeforeDate ? "#3B82F6" : cardBorder,
+                      backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
+                    },
+                  ]}
+                  onPress={() => setGuestTokenPickerStep("date")}
+                >
+                  <MaterialCommunityIcons
+                    name="calendar-clock-outline"
+                    size={16}
+                    color={guestTokenNotBeforeDate ? "#3B82F6" : colors.tabIconDefault}
+                  />
+                  <Text
+                    style={{
+                      flex: 1,
+                      fontSize: 14,
+                      color: guestTokenNotBeforeDate ? colors.text : colors.tabIconDefault,
+                    }}
+                  >
+                    {guestTokenNotBeforeDate
+                      ? `${guestTokenNotBeforeDate.toLocaleDateString()} ${guestTokenNotBeforeDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                      : "날짜/시간 선택"}
+                  </Text>
+                  {guestTokenNotBeforeDate && (
+                    <TouchableOpacity onPress={() => setGuestTokenNotBeforeDate(null)}>
+                      <MaterialCommunityIcons
+                        name="close-circle-outline"
+                        size={16}
+                        color={colors.tabIconDefault}
+                      />
+                    </TouchableOpacity>
+                  )}
+                </TouchableOpacity>
+                {guestTokenPickerStep !== null && (
+                  <DateTimePicker
+                    value={guestTokenNotBeforeDate ?? new Date()}
+                    mode={guestTokenPickerStep === "date" ? "date" : "time"}
+                    display={Platform.OS === "ios" ? "spinner" : "default"}
+                    onValueChange={(_event, selected) => {
+                      if (!selected) {
+                        setGuestTokenPickerStep(null);
+                        return;
+                      }
+                      if (guestTokenPickerStep === "date") {
+                        const prev = guestTokenNotBeforeDate ?? new Date();
+                        const next = new Date(selected);
+                        next.setHours(prev.getHours(), prev.getMinutes(), 0, 0);
+                        setGuestTokenNotBeforeDate(next);
+                        if (Platform.OS === "android") setGuestTokenPickerStep("time");
+                        else setGuestTokenPickerStep(null);
+                      } else {
+                        const prev = guestTokenNotBeforeDate ?? new Date();
+                        const next = new Date(prev);
+                        next.setHours(selected.getHours(), selected.getMinutes(), 0, 0);
+                        setGuestTokenNotBeforeDate(next);
+                        setGuestTokenPickerStep(null);
+                      }
+                    }}
+                    onDismiss={() => setGuestTokenPickerStep(null)}
+                  />
+                )}
+              </View>
+            )}
+
+            {guestTokenShowExtra && withSchedule && (
+              <View style={styles.modalField}>
+                <TouchableOpacity
+                  style={styles.scheduleToggleRow}
+                  onPress={() => {
+                    const next = !scheduleEnabled;
+                    setScheduleEnabled(next);
+                    if (next && scheduleWindows.length === 0) {
+                      setScheduleWindows([
+                        { id: 1, days: [...WEEKDAYS], start: "09:00", end: "18:00", max_uses: 1 },
+                      ]);
+                    }
+                  }}
+                >
+                  <MaterialCommunityIcons
+                    name={scheduleEnabled ? "checkbox-marked" : "checkbox-blank-outline"}
+                    size={18}
+                    color={scheduleEnabled ? "#3B82F6" : colors.tabIconDefault}
+                  />
+                  <Text style={[styles.modalFieldLabel, { color: colors.text, marginBottom: 0 }]}>
+                    사용 시간 제한
+                  </Text>
+                </TouchableOpacity>
+
+                {scheduleEnabled && (
+                  <>
+                    <Text style={[styles.scheduleHint, { color: colors.tabIconDefault }]}>
+                      {`선택한 시간대에만 사용할 수 있습니다.\n기준 시간대: ${deviceTimeZone()}`}
+                    </Text>
+
+                    {scheduleWindows.map((w) => (
+                      <View
+                        key={w.id}
+                        style={[
+                          styles.scheduleCard,
+                          { backgroundColor: isDark ? "#2A2D31" : "#F9FAFB", borderColor: cardBorder },
+                        ]}
+                      >
+                        <View style={styles.scheduleDayRow}>
+                          {([["평일", WEEKDAYS], ["주말", WEEKEND]] as const).map(
+                            ([label, group]) => {
+                              const on = group.every((d) => w.days.includes(d));
+                              return (
+                                <TouchableOpacity
+                                  key={label}
+                                  style={[
+                                    styles.dayChip,
+                                    {
+                                      borderColor: on ? "#3B82F6" : cardBorder,
+                                      backgroundColor: on
+                                        ? isDark
+                                          ? "rgba(59,130,246,0.15)"
+                                          : "#EFF6FF"
+                                        : "transparent",
+                                    },
+                                  ]}
+                                  onPress={() => toggleWindowPreset(w.id, [...group])}
+                                >
+                                  <Text
+                                    style={{
+                                      fontSize: 12,
+                                      fontWeight: "600",
+                                      color: on ? "#3B82F6" : colors.tabIconDefault,
+                                    }}
+                                  >
+                                    {label}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            },
+                          )}
+                        </View>
+                        <View style={styles.scheduleDayRow}>
+                          {DAY_ORDER.map((day) => {
+                            const on = w.days.includes(day);
+                            return (
+                              <TouchableOpacity
+                                key={day}
+                                style={[
+                                  styles.dayChip,
+                                  {
+                                    borderColor: on ? "#3B82F6" : cardBorder,
+                                    backgroundColor: on
+                                      ? isDark
+                                        ? "rgba(59,130,246,0.15)"
+                                        : "#EFF6FF"
+                                      : "transparent",
+                                  },
+                                ]}
+                                onPress={() => toggleWindowDay(w.id, day)}
+                              >
+                                <Text
+                                  style={{
+                                    fontSize: 12,
+                                    fontWeight: "600",
+                                    color: on ? "#3B82F6" : colors.tabIconDefault,
+                                  }}
+                                >
+                                  {DAY_LABEL[day]}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+
+                        <View style={styles.scheduleTimeRow}>
+                          {/* 범위 피커가 없어 한 요소 안에 시작·종료를 각각 누르게 한다. */}
+                          <View style={[styles.timeBtn, { borderColor: cardBorder }]}>
+                            <MaterialCommunityIcons
+                              name="clock-outline"
+                              size={14}
+                              color={colors.tabIconDefault}
+                            />
+                            <TouchableOpacity onPress={() => setSchedulePicker({ id: w.id, field: "start" })}>
+                              <Text style={{ fontSize: 13, color: colors.text }}>{w.start}</Text>
+                            </TouchableOpacity>
+                            <Text style={{ fontSize: 13, color: colors.tabIconDefault }}>~</Text>
+                            <TouchableOpacity onPress={() => setSchedulePicker({ id: w.id, field: "end" })}>
+                              <Text style={{ fontSize: 13, color: colors.text }}>{w.end}</Text>
+                            </TouchableOpacity>
+                          </View>
+                          <View style={[styles.windowUsesRow, { borderColor: cardBorder }]}>
+                            <TouchableOpacity
+                              onPress={() =>
+                                updateWindow(w.id, { max_uses: Math.max(1, w.max_uses - 1) })
+                              }
+                            >
+                              <Text style={[styles.stepperBtnText, { color: colors.text }]}>−</Text>
+                            </TouchableOpacity>
+                            <Text style={{ fontSize: 13, color: colors.text }}>{`하루 ${w.max_uses}회`}</Text>
+                            <TouchableOpacity
+                              onPress={() => updateWindow(w.id, { max_uses: w.max_uses + 1 })}
+                            >
+                              <Text style={[styles.stepperBtnText, { color: colors.text }]}>+</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+
+                        <TouchableOpacity
+                          style={styles.windowRemoveBtn}
+                          hitSlop={8}
+                          onPress={() =>
+                            setScheduleWindows((prev) => prev.filter((x) => x.id !== w.id))
+                          }
+                        >
+                          <MaterialCommunityIcons
+                            name="close-circle-outline"
+                            size={18}
+                            color={colors.tabIconDefault}
+                          />
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+
+                    {scheduleWindows.length < 10 && (
+                      <TouchableOpacity
+                        style={[styles.addWindowBtn, { borderColor: cardBorder }]}
+                        onPress={() =>
+                          setScheduleWindows((prev) => [
+                            ...prev,
+                            {
+                              id: prev.reduce((m, x) => Math.max(m, x.id), 0) + 1,
+                              days: [],
+                              start: "09:00",
+                              end: "18:00",
+                              max_uses: 1,
+                            },
+                          ])
+                        }
+                      >
+                        <MaterialCommunityIcons name="plus" size={16} color={colors.tabIconDefault} />
+                        <Text style={{ fontSize: 13, color: colors.tabIconDefault }}>시간대 추가</Text>
+                      </TouchableOpacity>
+                    )}
+
+                    <TouchableOpacity
+                      style={[styles.scheduleToggleRow, { marginTop: 8, marginBottom: 0 }]}
+                      onPress={() => setScheduleTotalLimit((v) => !v)}
+                    >
+                      <MaterialCommunityIcons
+                        name={scheduleTotalLimit ? "checkbox-marked" : "checkbox-blank-outline"}
+                        size={18}
+                        color={scheduleTotalLimit ? "#3B82F6" : colors.tabIconDefault}
+                      />
+                      <Text style={{ fontSize: 13, color: colors.tabIconDefault }}>
+                        총 사용 횟수도 제한
+                      </Text>
+                    </TouchableOpacity>
+
+                    {schedulePicker && (
+                      <DateTimePicker
+                        value={hhmmToDate(
+                          scheduleWindows.find((w) => w.id === schedulePicker.id)?.[
+                            schedulePicker.field
+                          ] ?? "09:00",
+                        )}
+                        mode="time"
+                        display={Platform.OS === "ios" ? "spinner" : "default"}
+                        onValueChange={(_event, selected) => {
+                          if (selected) {
+                            updateWindow(schedulePicker.id, {
+                              [schedulePicker.field]: dateToHhmm(selected),
+                            } as Partial<ScheduleWindow>);
+                          }
+                          setSchedulePicker(null);
+                        }}
+                        onDismiss={() => setSchedulePicker(null)}
+                      />
+                    )}
+                  </>
+                )}
+              </View>
+            )}
+    </>
+  );
+
+  // 탈퇴 모달은 실수 방지를 위해 2초 뒤에 버튼이 활성화된다.
+  useEffect(() => {
+    if (!deleteVisible || device?.role === "master") return;
+    setLeaveCountdown(2);
+    const timer = setInterval(() => {
+      setLeaveCountdown((v) => {
+        if (v <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return v - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [deleteVisible, device?.role]);
+
   if (isLoading) {
     return (
       <SafeAreaView
@@ -466,6 +1129,22 @@ export default function DeviceInfoView() {
   }
 
   const myRole = getRoleStyle(device.role, isDark);
+  // 서버의 is_active는 조회 시점 값이라 화면을 열어둔 채 만료되면 갱신되지 않는다.
+  // 만료 여부는 렌더할 때마다 직접 계산한다(30초 tick이 재렌더를 유발).
+  const hasActiveToken = selectedMemberTokens.some(
+    (t) => !!t.expired_at && new Date(t.expired_at).getTime() > Date.now(),
+  );
+
+  const remainingUses = myTokens.reduce(
+    (sum, t) => sum + Math.max(0, (t.max_uses ?? 0) - t.use_count),
+    0,
+  );
+  const hasUnlimitedToken = myTokens.some((t) => t.max_uses == null && t.is_active);
+  const canConfirmLeave =
+    device.role === "master"
+      ? confirmInput === device.device_uuid.slice(0, 8)
+      : leaveCountdown === 0;
+
   const pingColor = getPingColor(device.last_ping_at);
   const pingLabel =
     pingColor === "#22c55e" ? "온라인" : pingColor === "#eab308" ? "대기" : "오프라인";
@@ -549,7 +1228,7 @@ export default function DeviceInfoView() {
           </View>
           <View style={[styles.deviceCardDivider, { backgroundColor: cardBorder }]} />
           <View style={styles.deviceCardBottom}>
-            <View style={[styles.rolePill, { backgroundColor: myRole.bg }]}>
+            <View style={[styles.rolePill, { backgroundColor: myRole.bg, alignSelf: "center" }]}>
               <MaterialCommunityIcons name={myRole.icon} size={12} color={myRole.color} />
               <Text style={[styles.rolePillText, { color: myRole.color }]}>{myRole.label}</Text>
             </View>
@@ -560,12 +1239,14 @@ export default function DeviceInfoView() {
                   {pingLabel}
                 </Text>
               </View>
-              <TouchableOpacity
-                style={[styles.cardActionBtn, { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" }]}
-                onPress={openActivityLog}
-              >
-                <MaterialCommunityIcons name="text-box-search-outline" size={15} color={colors.tabIconDefault} />
-              </TouchableOpacity>
+              {device.role === "master" && (
+                <TouchableOpacity
+                  style={[styles.cardActionBtn, { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" }]}
+                  onPress={openActivityLog}
+                >
+                  <MaterialCommunityIcons name="text-box-search-outline" size={15} color={colors.tabIconDefault} />
+                </TouchableOpacity>
+              )}
             </View>
           </View>
         </View>
@@ -601,6 +1282,65 @@ export default function DeviceInfoView() {
             </View>
           )}
         </View>
+
+        {/* 내 토큰 섹션 (마스터 제외) */}
+        {device.role !== "master" && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={[styles.sectionTitle, { color: colors.text }]}>내 토큰</Text>
+            </View>
+            {myTokensLoading ? (
+              <ActivityIndicator color={colors.tint} style={{ marginVertical: 8 }} />
+            ) : myTokens.length === 0 ? (
+              <View style={[styles.emptyMembers, { backgroundColor: cardBg, borderColor: cardBorder }]}>
+                <Text style={[styles.emptyMembersText, { color: colors.tabIconDefault }]}>
+                  발급된 토큰 없음
+                </Text>
+              </View>
+            ) : (
+              <View style={{ gap: 6 }}>
+                {myTokens.map((t) => {
+                  const badge = t.expired_at ? getExpiredBadgeStyle(t.expired_at, isDark) : null;
+                  return (
+                    <View key={t.id} style={[styles.tokenItem, { backgroundColor: cardBg, borderColor: cardBorder }]}>
+                      <View style={styles.tokenItemRow}>
+                        <MaterialCommunityIcons name="key-outline" size={14} color={colors.tabIconDefault} />
+                        <Text style={[styles.tokenItemText, { color: colors.text }]}>
+                          {tokenUsageLabel(t)}
+                        </Text>
+                        {badge && (
+                          <TouchableOpacity
+                            style={[styles.codeExpiredBadge, { backgroundColor: badge.bg, marginLeft: "auto" }]}
+                            onPress={() =>
+                              showAlert(
+                                "토큰 만료까지",
+                                `${getExactTimeLeft(t.expired_at!)}\n만료 시각: ${new Date(t.expired_at!).toLocaleString()}`,
+                              )
+                            }
+                          >
+                            <Text style={[styles.codeExpiredText, { color: badge.color }]}>
+                              {getTimeLeft(t.expired_at!)}
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                      {t.not_before && (
+                        <Text style={[styles.tokenSubText, { color: colors.tabIconDefault }]}>
+                          {`활성화: ${new Date(t.not_before).toLocaleString()}`}
+                        </Text>
+                      )}
+                      {describeSchedule(t.schedule, t.schedule_tz) && (
+                        <Text style={[styles.tokenSubText, { color: colors.tabIconDefault }]}>
+                          {describeSchedule(t.schedule, t.schedule_tz)}
+                        </Text>
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        )}
 
         {/* 멤버 섹션 */}
         <View style={styles.section}>
@@ -711,147 +1451,179 @@ export default function DeviceInfoView() {
 
       {/* 초대 코드 생성 모달 */}
       <Modal visible={isModalOpen} transparent animationType="fade" onRequestClose={handleCancel}>
-        <Pressable style={styles.modalBackdrop} onPress={handleCancel}>
-          <Pressable style={[styles.modalBox, { backgroundColor: modalBg }]}>
-            <View style={styles.modalHeader}>
-              <MaterialCommunityIcons name="account-plus-outline" size={22} color={colors.tint} />
-              <Text style={[styles.modalTitle, { color: colors.text }]}>초대 코드 생성</Text>
-            </View>
-
-            {inviteResult ? (
-              <View
-                style={[
-                  styles.resultBox,
-                  { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6", borderColor: cardBorder },
-                ]}
-              >
-                <Text style={[styles.resultLabel, { color: colors.tabIconDefault }]}>
-                  사용자 이름
-                </Text>
-                <Text style={[styles.resultValue, { color: colors.text }]}>
-                  {inviteResult.display_name}
-                </Text>
-                <View style={styles.resultDivider} />
-                <Text style={[styles.resultLabel, { color: colors.tabIconDefault }]}>
-                  초대 코드
-                </Text>
-                <View style={styles.resultCodeRow}>
-                  <Text selectable style={[styles.resultCode, { color: colors.text }]}>
-                    {inviteResult.invite_code}
-                  </Text>
-                  <TouchableOpacity
-                    style={[styles.copyBtn, { backgroundColor: colors.tint }]}
-                    onPress={() => {
-                      Clipboard.setString(inviteResult.invite_code);
-                      showAlert("복사됨", "초대 코드가 복사되었습니다.");
-                    }}
-                  >
-                    <MaterialCommunityIcons name="content-copy" size={14} color="#fff" />
-                    <Text style={styles.copyBtnText}>복사</Text>
-                  </TouchableOpacity>
-                </View>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
+          <Pressable style={styles.modalBackdrop} onPress={handleCancel}>
+            <Pressable style={[styles.modalBox, { backgroundColor: modalBg, maxHeight: "85%" }]}>
+              <View style={styles.modalHeader}>
+                <MaterialCommunityIcons name="account-plus-outline" size={22} color={colors.tint} />
+                <Text style={[styles.modalTitle, { color: colors.text }]}>초대 코드 생성</Text>
               </View>
-            ) : (
-              <>
-                <View style={styles.modalField}>
-                  <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
+
+              <ScrollView style={{ flexGrow: 0 }} contentContainerStyle={{ gap: 20 }}
+                keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+              {inviteResult ? (
+                <View
+                  style={[
+                    styles.resultBox,
+                    { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6", borderColor: cardBorder },
+                  ]}
+                >
+                  <Text style={[styles.resultLabel, { color: colors.tabIconDefault }]}>
                     사용자 이름
                   </Text>
-                  <TextInput
-                    style={[
-                      styles.modalInput,
-                      {
-                        color: colors.text,
-                        backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
-                        borderColor: cardBorder,
-                      },
-                    ]}
-                    placeholder="이름을 입력하세요"
-                    value={displayName}
-                    onChangeText={setDisplayName}
-                    autoFocus
-                    placeholderTextColor={colors.tabIconDefault}
-                  />
-                </View>
-                <View style={styles.modalField}>
-                  <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
-                    역할
+                  <Text style={[styles.resultValue, { color: colors.text }]}>
+                    {inviteResult.display_name}
                   </Text>
-                  <View style={styles.roleSelector}>
-                    {(["member", "guest"] as const).map((r) => {
-                      const selected = inviteRole === r;
-                      const label = r === "member" ? "멤버" : "게스트";
-                      return (
-                        <TouchableOpacity
-                          key={r}
-                          style={[
-                            styles.roleOption,
-                            {
-                              borderColor: selected ? colors.tint : cardBorder,
-                              backgroundColor: selected
-                                ? isDark
-                                  ? "rgba(10,126,164,0.15)"
-                                  : "#EFF8FC"
-                                : isDark
-                                  ? "#2A2D31"
-                                  : "#F9FAFB",
-                            },
-                          ]}
-                          onPress={() => setInviteRole(r)}
-                        >
-                          <MaterialCommunityIcons
-                            name={r === "member" ? "account" : "account-outline"}
-                            size={16}
-                            color={selected ? colors.tint : colors.tabIconDefault}
-                          />
-                          <Text
-                            style={[
-                              styles.roleOptionText,
-                              { color: selected ? colors.tint : colors.tabIconDefault },
-                            ]}
-                          >
-                            {label}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
+                  <View style={styles.resultDivider} />
+                  <Text style={[styles.resultLabel, { color: colors.tabIconDefault }]}>
+                    초대 코드
+                  </Text>
+                  <View style={styles.resultCodeRow}>
+                    <Text selectable style={[styles.resultCode, { color: colors.text }]}>
+                      {inviteResult.invite_code}
+                    </Text>
+                    <TouchableOpacity
+                      style={[styles.copyBtn, { backgroundColor: colors.tint }]}
+                      onPress={() => {
+                        Clipboard.setString(inviteResult.invite_code);
+                        showAlert("복사됨", "초대 코드가 복사되었습니다.");
+                      }}
+                    >
+                      <MaterialCommunityIcons name="content-copy" size={14} color="#fff" />
+                      <Text style={styles.copyBtnText}>복사</Text>
+                    </TouchableOpacity>
                   </View>
                 </View>
-              </>
-            )}
-
-            <View style={styles.modalFooter}>
-              {inviteResult ? (
-                <TouchableOpacity
-                  style={[styles.modalBtnPrimary, { backgroundColor: "#3B82F6" }]}
-                  onPress={handleCancel}
-                >
-                  <Text style={styles.modalBtnPrimaryText}>닫기</Text>
-                </TouchableOpacity>
               ) : (
                 <>
-                  <TouchableOpacity
-                    style={[
-                      styles.modalBtnSecondary,
-                      { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" },
-                    ]}
-                    onPress={handleCancel}
-                  >
-                    <Text style={[styles.modalBtnSecondaryText, { color: colors.tabIconDefault }]}>
-                      취소
+                  <View style={styles.modalField}>
+                    <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
+                      사용자 이름
                     </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.modalBtnPrimary, { backgroundColor: "#3B82F6" }]}
-                    onPress={handleOk}
-                  >
-                    <Text style={styles.modalBtnPrimaryText}>확인</Text>
-                  </TouchableOpacity>
+                    <TextInput
+                      style={[
+                        styles.modalInput,
+                        {
+                          color: colors.text,
+                          backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
+                          borderColor: cardBorder,
+                        },
+                      ]}
+                      placeholder="이름을 입력하세요"
+                      value={displayName}
+                      onChangeText={setDisplayName}
+                      autoFocus
+                      placeholderTextColor={colors.tabIconDefault}
+                    />
+                  </View>
+                  <View style={styles.modalField}>
+                    <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
+                      역할
+                    </Text>
+                    <View style={styles.roleSelector}>
+                      {(["member", "guest"] as const).map((r) => {
+                        const selected = inviteRole === r;
+                        const label = r === "member" ? "멤버" : "게스트";
+                        return (
+                          <TouchableOpacity
+                            key={r}
+                            style={[
+                              styles.roleOption,
+                              {
+                                borderColor: selected ? colors.tint : cardBorder,
+                                backgroundColor: selected
+                                  ? isDark
+                                    ? "rgba(10,126,164,0.15)"
+                                    : "#EFF8FC"
+                                  : isDark
+                                    ? "#2A2D31"
+                                    : "#F9FAFB",
+                              },
+                            ]}
+                            onPress={() => setInviteRole(r)}
+                          >
+                            <MaterialCommunityIcons
+                              name={r === "member" ? "account" : "account-outline"}
+                              size={16}
+                              color={selected ? colors.tint : colors.tabIconDefault}
+                            />
+                            <Text
+                              style={[
+                                styles.roleOptionText,
+                                { color: selected ? colors.tint : colors.tabIconDefault },
+                              ]}
+                            >
+                              {label}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  {inviteRole === "guest" && (
+                    <>
+                      <TouchableOpacity
+                        style={styles.extraToggle}
+                        onPress={() => setInviteWithToken((v) => !v)}
+                      >
+                        <MaterialCommunityIcons
+                          name={inviteWithToken ? "checkbox-marked-outline" : "checkbox-blank-outline"}
+                          size={16}
+                          color={inviteWithToken ? "#3B82F6" : colors.tabIconDefault}
+                        />
+                        <Text
+                          style={[
+                            styles.extraToggleText,
+                            { color: inviteWithToken ? "#3B82F6" : colors.tabIconDefault },
+                          ]}
+                        >
+                          토큰 정보 함께 지정
+                        </Text>
+                      </TouchableOpacity>
+                      {inviteWithToken && tokenOptionFields(false)}
+                    </>
+                  )}
                 </>
               )}
-            </View>
+              </ScrollView>
+
+              <View style={styles.modalFooter}>
+                {inviteResult ? (
+                  <TouchableOpacity
+                    style={[styles.modalBtnPrimary, { backgroundColor: "#3B82F6" }]}
+                    onPress={handleCancel}
+                  >
+                    <Text style={styles.modalBtnPrimaryText}>닫기</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <>
+                    <TouchableOpacity
+                      style={[
+                        styles.modalBtnSecondary,
+                        { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" },
+                      ]}
+                      onPress={handleCancel}
+                    >
+                      <Text style={[styles.modalBtnSecondaryText, { color: colors.tabIconDefault }]}>
+                        취소
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.modalBtnPrimary, { backgroundColor: "#3B82F6" }]}
+                      onPress={handleOk}
+                    >
+                      <Text style={styles.modalBtnPrimaryText}>확인</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            </Pressable>
           </Pressable>
-        </Pressable>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* 초대 코드 기록 모달 */}
@@ -997,65 +1769,70 @@ export default function DeviceInfoView() {
           setNicknameInput("");
         }}
       >
-        <Pressable
-          style={styles.modalBackdrop}
-          onPress={() => {
-            setIsNicknameModalOpen(false);
-            setNicknameInput("");
-          }}
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
         >
-          <Pressable style={[styles.modalBox, { backgroundColor: modalBg }]}>
-            <View style={styles.modalHeader}>
-              <MaterialCommunityIcons name="pencil-outline" size={22} color={colors.tint} />
-              <Text style={[styles.modalTitle, { color: colors.text }]}>기기 별명 설정</Text>
-            </View>
-            <View style={styles.modalField}>
-              <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>별명</Text>
-              <TextInput
-                style={[
-                  styles.modalInput,
-                  {
-                    color: colors.text,
-                    backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
-                    borderColor: cardBorder,
-                  },
-                ]}
-                placeholder="별명을 입력하세요"
-                value={nicknameInput}
-                onChangeText={setNicknameInput}
-                autoFocus
-                placeholderTextColor={colors.tabIconDefault}
-                maxLength={30}
-              />
-            </View>
-            <View style={styles.modalFooter}>
-              <TouchableOpacity
-                style={[
-                  styles.modalBtnSecondary,
-                  { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" },
-                ]}
-                onPress={() => {
-                  setIsNicknameModalOpen(false);
-                  setNicknameInput("");
-                }}
-              >
-                <Text style={[styles.modalBtnSecondaryText, { color: colors.tabIconDefault }]}>
-                  취소
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.modalBtnPrimary,
-                  { backgroundColor: nicknameInput.trim() ? "#3B82F6" : "#9CA3AF" },
-                ]}
-                disabled={!nicknameInput.trim()}
-                onPress={handleNicknameConfirm}
-              >
-                <Text style={styles.modalBtnPrimaryText}>확인</Text>
-              </TouchableOpacity>
-            </View>
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => {
+              setIsNicknameModalOpen(false);
+              setNicknameInput("");
+            }}
+          >
+            <Pressable style={[styles.modalBox, { backgroundColor: modalBg }]}>
+              <View style={styles.modalHeader}>
+                <MaterialCommunityIcons name="pencil-outline" size={22} color={colors.tint} />
+                <Text style={[styles.modalTitle, { color: colors.text }]}>기기 별명 설정</Text>
+              </View>
+              <View style={styles.modalField}>
+                <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>별명</Text>
+                <TextInput
+                  style={[
+                    styles.modalInput,
+                    {
+                      color: colors.text,
+                      backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
+                      borderColor: cardBorder,
+                    },
+                  ]}
+                  placeholder="별명을 입력하세요"
+                  value={nicknameInput}
+                  onChangeText={setNicknameInput}
+                  autoFocus
+                  placeholderTextColor={colors.tabIconDefault}
+                  maxLength={30}
+                />
+              </View>
+              <View style={styles.modalFooter}>
+                <TouchableOpacity
+                  style={[
+                    styles.modalBtnSecondary,
+                    { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" },
+                  ]}
+                  onPress={() => {
+                    setIsNicknameModalOpen(false);
+                    setNicknameInput("");
+                  }}
+                >
+                  <Text style={[styles.modalBtnSecondaryText, { color: colors.tabIconDefault }]}>
+                    취소
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.modalBtnPrimary,
+                    { backgroundColor: nicknameInput.trim() ? "#3B82F6" : "#9CA3AF" },
+                  ]}
+                  disabled={!nicknameInput.trim()}
+                  onPress={handleNicknameConfirm}
+                >
+                  <Text style={styles.modalBtnPrimaryText}>확인</Text>
+                </TouchableOpacity>
+              </View>
+            </Pressable>
           </Pressable>
-        </Pressable>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* 기기 삭제 모달 */}
@@ -1068,95 +1845,115 @@ export default function DeviceInfoView() {
           setConfirmInput("");
         }}
       >
-        <Pressable
-          style={styles.modalBackdrop}
-          onPress={() => {
-            setDeleteVisible(false);
-            setConfirmInput("");
-          }}
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
         >
-          <Pressable style={[styles.modalBox, { backgroundColor: modalBg }]}>
-            <View style={styles.modalHeader}>
-              <MaterialCommunityIcons
-                name={device.role === "master" ? "delete-outline" : "logout-variant"}
-                size={22}
-                color="#EF4444"
-              />
-              <Text style={[styles.modalTitle, { color: colors.text }]}>
-                {device.role === "master" ? "기기 삭제" : "기기 탈퇴"}
-              </Text>
-            </View>
-            <Text style={[styles.deleteGuide, { color: colors.tabIconDefault }]}>
-              확인을 위해 기기 ID 앞 8자리를 입력해 주세요
-            </Text>
-            <Text style={[styles.deleteHint, { color: colors.text }]}>
-              {device.device_uuid.slice(0, 8)}
-            </Text>
-            <TextInput
-              style={[
-                styles.modalInput,
-                {
-                  color: colors.text,
-                  backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
-                  borderColor: cardBorder,
-                },
-              ]}
-              value={confirmInput}
-              onChangeText={setConfirmInput}
-              placeholder="앞 8자리 입력"
-              placeholderTextColor={colors.tabIconDefault}
-              maxLength={8}
-              autoCapitalize="none"
-            />
-            <View style={styles.modalFooter}>
-              <TouchableOpacity
-                style={[
-                  styles.modalBtnSecondary,
-                  { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" },
-                ]}
-                onPress={() => {
-                  setDeleteVisible(false);
-                  setConfirmInput("");
-                }}
-              >
-                <Text style={[styles.modalBtnSecondaryText, { color: colors.tabIconDefault }]}>
-                  취소
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => {
+              setDeleteVisible(false);
+              setConfirmInput("");
+            }}
+          >
+            <Pressable style={[styles.modalBox, { backgroundColor: modalBg }]}>
+              <View style={styles.modalHeader}>
+                <MaterialCommunityIcons
+                  name={device.role === "master" ? "delete-outline" : "logout-variant"}
+                  size={22}
+                  color="#EF4444"
+                />
+                <Text style={[styles.modalTitle, { color: colors.text }]}>
+                  {device.role === "master" ? "기기 삭제" : "기기 탈퇴"}
                 </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.modalBtnPrimary,
-                  {
-                    backgroundColor:
-                      confirmInput === device.device_uuid.slice(0, 8) ? "#EF4444" : "#9CA3AF",
-                  },
-                ]}
-                disabled={confirmInput !== device.device_uuid.slice(0, 8) || isDeleting}
-                onPress={async () => {
-                  setIsDeleting(true);
-                  const result =
-                    device.role === "master"
-                      ? await deleteDevice(device.device_uuid)
-                      : await deleteMemberShip(device.device_uuid);
-                  setIsDeleting(false);
-                  if (result?.type === "success") {
-                    await unbondDevice(device.device_uuid);
+              </View>
+              {device.role === "master" ? (
+                <>
+                  <Text style={[styles.deleteGuide, { color: colors.tabIconDefault }]}>
+                    확인을 위해 기기 ID 앞 8자리를 입력해 주세요
+                  </Text>
+                  <Text style={[styles.deleteHint, { color: colors.text }]}>
+                    {device.device_uuid.slice(0, 8)}
+                  </Text>
+                  <TextInput
+                    style={[
+                      styles.modalInput,
+                      {
+                        color: colors.text,
+                        backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
+                        borderColor: cardBorder,
+                      },
+                    ]}
+                    value={confirmInput}
+                    onChangeText={setConfirmInput}
+                    placeholder="앞 8자리 입력"
+                    placeholderTextColor={colors.tabIconDefault}
+                    maxLength={8}
+                    autoCapitalize="none"
+                  />
+                </>
+              ) : (
+                <Text style={[styles.deleteGuide, { color: colors.tabIconDefault }]}>
+                  {hasUnlimitedToken
+                    ? "아직 사용 가능한 토큰이 남아 있습니다. 탈퇴하면 토큰과 기기 접근 권한이 삭제되며 다시 초대받아야 합니다."
+                    : remainingUses > 0
+                    ? `아직 ${remainingUses}회 사용 가능한 토큰이 남아 있습니다. 탈퇴하면 토큰과 기기 접근 권한이 삭제되며 다시 초대받아야 합니다.`
+                    : "탈퇴하면 기기 접근 권한이 삭제되며 다시 초대받아야 합니다."}
+                </Text>
+              )}
+              <View style={styles.modalFooter}>
+                <TouchableOpacity
+                  style={[
+                    styles.modalBtnSecondary,
+                    { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" },
+                  ]}
+                  onPress={() => {
                     setDeleteVisible(false);
-                    router.push("/home");
-                  } else {
-                    showAlert("삭제 실패", result?.message ?? "오류가 발생했습니다.");
-                  }
-                }}
-              >
-                {isDeleting ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.modalBtnPrimaryText}>삭제</Text>
-                )}
-              </TouchableOpacity>
-            </View>
+                    setConfirmInput("");
+                  }}
+                >
+                  <Text style={[styles.modalBtnSecondaryText, { color: colors.tabIconDefault }]}>
+                    취소
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.modalBtnPrimary,
+                    { backgroundColor: canConfirmLeave ? "#EF4444" : "#9CA3AF" },
+                  ]}
+                  disabled={!canConfirmLeave || isDeleting}
+                  onPress={async () => {
+                    setIsDeleting(true);
+                    const result =
+                      device.role === "master"
+                        ? await deleteDevice(device.device_uuid)
+                        : await deleteMemberShip(device.device_uuid);
+                    setIsDeleting(false);
+                    if (result?.type === "success") {
+                      await unbondDevice(device.device_uuid);
+                      setDeleteVisible(false);
+                      router.push("/home");
+                    } else {
+                      showAlert("삭제 실패", result?.message ?? "오류가 발생했습니다.");
+                    }
+                  }}
+                >
+                  {isDeleting ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.modalBtnPrimaryText}>
+                      {device.role === "master"
+                        ? "삭제"
+                        : leaveCountdown > 0
+                          ? `나가기 (${leaveCountdown})`
+                          : "나가기"}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </Pressable>
           </Pressable>
-        </Pressable>
+        </KeyboardAvoidingView>
       </Modal>
       {/* 게스트 토큰 발급 모달 */}
       <Modal
@@ -1182,185 +1979,14 @@ export default function DeviceInfoView() {
                 </Text>
                 {"에게 발급할 토큰 설정을 입력하세요."}
               </Text>
-              <View style={styles.modalField}>
-                <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
-                  최대 사용 횟수 (기본 1)
-                </Text>
-                <View style={styles.stepperRow}>
-                  <TouchableOpacity
-                    style={[
-                      styles.stepperBtn,
-                      { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6", borderColor: cardBorder },
-                    ]}
-                    onPress={() => setGuestTokenMaxUses((v) => Math.max(1, v - 1))}
-                  >
-                    <Text style={[styles.stepperBtnText, { color: colors.text }]}>−</Text>
-                  </TouchableOpacity>
-                  <Text
-                    style={[
-                      styles.stepperValue,
-                      {
-                        color: colors.text,
-                        borderColor: cardBorder,
-                        backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
-                      },
-                    ]}
-                  >
-                    {guestTokenMaxUses}
-                  </Text>
-                  <TouchableOpacity
-                    style={[
-                      styles.stepperBtn,
-                      { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6", borderColor: cardBorder },
-                    ]}
-                    onPress={() => setGuestTokenMaxUses((v) => v + 1)}
-                  >
-                    <Text style={[styles.stepperBtnText, { color: colors.text }]}>+</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-              <View style={styles.modalField}>
-                <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
-                  만료 시간 (기본 3일)
-                </Text>
-                <View style={styles.expireRow}>
-                  <TextInput
-                    style={[
-                      styles.modalInput,
-                      {
-                        flex: 1,
-                        color: colors.text,
-                        backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
-                        borderColor: cardBorder,
-                      },
-                    ]}
-                    placeholder="3"
-                    placeholderTextColor={colors.tabIconDefault}
-                    value={guestTokenExpireValue}
-                    onChangeText={setGuestTokenExpireValue}
-                    keyboardType="numeric"
-                  />
-                  <View style={styles.unitSelector}>
-                    {(["분", "시", "일"] as const).map((unit) => (
-                      <TouchableOpacity
-                        key={unit}
-                        style={[
-                          styles.unitBtn,
-                          {
-                            borderColor: guestTokenExpireUnit === unit ? "#3B82F6" : cardBorder,
-                            backgroundColor:
-                              guestTokenExpireUnit === unit
-                                ? isDark
-                                  ? "rgba(59,130,246,0.15)"
-                                  : "#EFF6FF"
-                                : isDark
-                                  ? "#2A2D31"
-                                  : "#F9FAFB",
-                          },
-                        ]}
-                        onPress={() => setGuestTokenExpireUnit(unit)}
-                      >
-                        <Text
-                          style={{
-                            fontSize: 13,
-                            fontWeight: "600",
-                            color:
-                              guestTokenExpireUnit === unit ? "#3B82F6" : colors.tabIconDefault,
-                          }}
-                        >
-                          {unit}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                </View>
-              </View>
-
-              <TouchableOpacity
-                style={styles.extraToggle}
-                onPress={() => setGuestTokenShowExtra((v) => !v)}
+              {/* 시간대를 여러 개 추가하면 길어지므로 옵션 영역만 스크롤한다(제목·버튼은 고정). */}
+              <ScrollView
+                style={{ maxHeight: windowHeight * 0.55 }}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator
               >
-                <MaterialCommunityIcons
-                  name={guestTokenShowExtra ? "chevron-up" : "chevron-down"}
-                  size={16}
-                  color={colors.tabIconDefault}
-                />
-                <Text style={[styles.extraToggleText, { color: colors.tabIconDefault }]}>
-                  추가 옵션
-                </Text>
-              </TouchableOpacity>
-
-              {guestTokenShowExtra && (
-                <View style={styles.modalField}>
-                  <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>
-                    활성화 시작 시각 (기본 즉시)
-                  </Text>
-                  <TouchableOpacity
-                    style={[
-                      styles.datePickerBtn,
-                      {
-                        borderColor: guestTokenNotBeforeDate ? "#3B82F6" : cardBorder,
-                        backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
-                      },
-                    ]}
-                    onPress={() => setGuestTokenPickerStep("date")}
-                  >
-                    <MaterialCommunityIcons
-                      name="calendar-clock-outline"
-                      size={16}
-                      color={guestTokenNotBeforeDate ? "#3B82F6" : colors.tabIconDefault}
-                    />
-                    <Text
-                      style={{
-                        flex: 1,
-                        fontSize: 14,
-                        color: guestTokenNotBeforeDate ? colors.text : colors.tabIconDefault,
-                      }}
-                    >
-                      {guestTokenNotBeforeDate
-                        ? `${guestTokenNotBeforeDate.toLocaleDateString()} ${guestTokenNotBeforeDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-                        : "날짜/시간 선택"}
-                    </Text>
-                    {guestTokenNotBeforeDate && (
-                      <TouchableOpacity onPress={() => setGuestTokenNotBeforeDate(null)}>
-                        <MaterialCommunityIcons
-                          name="close-circle-outline"
-                          size={16}
-                          color={colors.tabIconDefault}
-                        />
-                      </TouchableOpacity>
-                    )}
-                  </TouchableOpacity>
-                  {guestTokenPickerStep !== null && (
-                    <DateTimePicker
-                      value={guestTokenNotBeforeDate ?? new Date()}
-                      mode={guestTokenPickerStep === "date" ? "date" : "time"}
-                      display={Platform.OS === "ios" ? "spinner" : "default"}
-                      onValueChange={(_event, selected) => {
-                        if (!selected) {
-                          setGuestTokenPickerStep(null);
-                          return;
-                        }
-                        if (guestTokenPickerStep === "date") {
-                          const prev = guestTokenNotBeforeDate ?? new Date();
-                          const next = new Date(selected);
-                          next.setHours(prev.getHours(), prev.getMinutes(), 0, 0);
-                          setGuestTokenNotBeforeDate(next);
-                          if (Platform.OS === "android") setGuestTokenPickerStep("time");
-                          else setGuestTokenPickerStep(null);
-                        } else {
-                          const prev = guestTokenNotBeforeDate ?? new Date();
-                          const next = new Date(prev);
-                          next.setHours(selected.getHours(), selected.getMinutes(), 0, 0);
-                          setGuestTokenNotBeforeDate(next);
-                          setGuestTokenPickerStep(null);
-                        }
-                      }}
-                      onDismiss={() => setGuestTokenPickerStep(null)}
-                    />
-                  )}
-                </View>
-              )}
+                {tokenOptionFields(true)}
+              </ScrollView>
 
               <View style={styles.modalFooter}>
                 <TouchableOpacity
@@ -1448,14 +2074,22 @@ export default function DeviceInfoView() {
                                 <View style={styles.tokenItemRow}>
                                   <MaterialCommunityIcons name="key-outline" size={14} color={colors.tabIconDefault} />
                                   <Text style={[styles.tokenItemText, { color: colors.text }]}>
-                                    {`사용 ${t.use_count} / ${t.max_uses ?? "∞"}`}
+                                    {tokenUsageLabel(t)}
                                   </Text>
                                   {badge && (
-                                    <View style={[styles.codeExpiredBadge, { backgroundColor: badge.bg, marginLeft: "auto" }]}>
+                                    <TouchableOpacity
+                                      style={[styles.codeExpiredBadge, { backgroundColor: badge.bg, marginLeft: "auto" }]}
+                                      onPress={() =>
+                                        showAlert(
+                                          "토큰 만료까지",
+                                          `${getExactTimeLeft(t.expired_at!)}\n만료 시각: ${new Date(t.expired_at!).toLocaleString()}`,
+                                        )
+                                      }
+                                    >
                                       <Text style={[styles.codeExpiredText, { color: badge.color }]}>
                                         {getTimeLeft(t.expired_at!)}
                                       </Text>
-                                    </View>
+                                    </TouchableOpacity>
                                   )}
                                   <TouchableOpacity
                                     onPress={() => {
@@ -1485,6 +2119,11 @@ export default function DeviceInfoView() {
                                     {`활성화: ${new Date(t.not_before).toLocaleString()}`}
                                   </Text>
                                 )}
+                                {describeSchedule(t.schedule, t.schedule_tz) && (
+                                  <Text style={[styles.tokenSubText, { color: colors.tabIconDefault }]}>
+                                    {describeSchedule(t.schedule, t.schedule_tz)}
+                                  </Text>
+                                )}
                               </View>
                             );
                           })}
@@ -1494,7 +2133,7 @@ export default function DeviceInfoView() {
                   )}
 
                   <View style={styles.memberDetailActions}>
-                    {selectedMember.role === "guest" && (
+                    {selectedMember.role === "guest" && !hasActiveToken && (
                       <TouchableOpacity
                         style={[styles.memberDetailActionBtn, { backgroundColor: isDark ? "rgba(59,130,246,0.12)" : "#EFF6FF" }]}
                         onPress={() => {
@@ -1987,6 +2626,75 @@ const styles = StyleSheet.create({
   cardActions: {
     flexDirection: "row",
     gap: 6,
+  },
+  scheduleToggleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 8,
+  },
+  scheduleHint: {
+    fontSize: 11,
+    marginBottom: 8,
+  },
+  scheduleCard: {
+    borderWidth: 1,
+    borderRadius: 10,
+    padding: 12,
+    gap: 8,
+    marginBottom: 8,
+  },
+  scheduleDayRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 4,
+  },
+  dayChip: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  scheduleTimeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  timeBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  // 첫 줄은 평일/주말 칩 두 개뿐이라 우상단에 겹치지 않는다.
+  // 카드 padding(12)에 맞추고 첫 줄 칩(높이 ~22)과 세로 중앙을 맞춘다.
+  windowRemoveBtn: {
+    position: "absolute",
+    top: 14,
+    right: 12,
+  },
+  windowUsesRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginLeft: "auto",
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 2,
+  },
+  addWindowBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    borderWidth: 1,
+    borderStyle: "dashed",
+    borderRadius: 10,
+    paddingVertical: 8,
   },
   cardActionBtn: {
     width: 32,

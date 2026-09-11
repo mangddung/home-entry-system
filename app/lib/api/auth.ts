@@ -73,6 +73,36 @@ export const refreshToken = async () => {
   }
 };
 
+export type InvitePreview = {
+  device_uuid_prefix: string | null;
+  device_nickname: string | null;
+  role: string;
+  display_name: string;
+  inviter_name: string | null;
+  expired_at: string | null;
+  token_max_uses?: number | null;
+  token_expire_minutes?: number | null;
+  token_not_before?: string | null;
+};
+
+// GET /auth/invite-code/preview?invite_code=
+export const fetchInvitePreview = async (invite_code: string) => {
+  const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
+  if (!access_token) {
+    return { type: "forbidden", message: "액세스 토큰이 없습니다." };
+  }
+
+  try {
+    const response = await axios.get(
+      `${BACKEND_URL}/auth/invite-code/preview?invite_code=${encodeURIComponent(invite_code)}`,
+      { headers: { Authorization: `Bearer ${access_token}` } },
+    );
+    return { type: "success", data: response.data.data as InvitePreview };
+  } catch (error) {
+    return { type: "error", message: getApiErrorMessage(error) };
+  }
+};
+
 export const fetchRegisterInviteCode = async (invite_code: String) => {
   const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
   if (!access_token) {

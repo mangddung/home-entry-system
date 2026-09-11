@@ -1,3 +1,4 @@
+import json
 import secrets
 from datetime import datetime, timezone, timedelta
 import os
@@ -64,6 +65,9 @@ def _get_or_create_token(session, user_uuid: str, device_uuid: str, role: str) -
         "use_count":   token.use_count,
         "not_before":  token.not_before.isoformat() + "Z" if token.not_before else None,
         "expired_at":  token.expired_at.isoformat() + "Z" if token.expired_at else None,
+        # 게스트 앱이 시간대 밖에서 BLE 스캔을 쉬도록 규칙을 함께 내려준다(판정은 서버가 최종).
+        "schedule":    json.loads(token.schedule_json) if token.schedule_json else None,
+        "schedule_tz": token.schedule_tz,
     }
 
 
@@ -236,7 +240,8 @@ def get_device_location():
             session.commit()
             
             log_activity("device_location_updated", user_uuid=user_uuid, device_uuid=device_uuid)
-            send_to_device_role(device_uuid, ["master", "member", "guest"], f"{device_uuid[:8]} 기기 알림", "기기 위치가 갱신되었습니다")
+            # 멤버·게스트 앱이 지오펜스를 새 좌표로 다시 등록하도록 refresh_devices를 싣는다
+            send_to_device_role(device_uuid, ["master", "member", "guest"], f"{device_uuid[:8]} 기기 알림", "기기 위치가 갱신되었습니다", data={"type": "refresh_devices"})
 
 
         return jsonify({"status": "success", "message": "success"}), 200
@@ -265,6 +270,9 @@ def delete_device():
         if device is None:
             return jsonify({"status": "error", "message": "device not found"}), 400
 
+        # 삭제 시 매핑이 cascade로 사라지므로 알림 대상은 미리 모은다
+        notify_uuids = [m.user_uuid for m in session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid).all()]
+
         saved = {
             "device_uuid": device.device_uuid,
             "device_secret_key": device.device_secret_key,
@@ -285,7 +293,9 @@ def delete_device():
         session.commit()
 
         log_activity("device_deleted", user_uuid=user_uuid, device_uuid=device_uuid)
-        send_to_user(user_uuid, f"{device_nickname} 기기 알림", "기기가 삭제되었습니다")
+        # 멤버·게스트 앱이 삭제된 기기의 지오펜스·캐시를 내리도록 refresh_devices를 싣는다
+        for uid in notify_uuids:
+            send_to_user(uid, f"{device_nickname} 기기 알림", "기기가 삭제되었습니다", data={"type": "refresh_devices"})
 
         return jsonify({"status": "success", "message": "success"}), 200
 
@@ -319,6 +329,10 @@ def delete_device_membership():
         master_uuid     = master_mapping.user_uuid if master_mapping else None
         master_nickname = master_mapping.device_nickname or device_uuid[:8] if master_mapping else device_uuid[:8]
 
+        # 매핑만 지우면 유효 토큰이 고아로 남는다(강퇴 경로와 동일하게 정리).
+        # 일괄 delete()는 ORM cascade를 건너뛰어 token_usages가 고아로 남고, 재사용된 토큰 id가 그 횟수를 물려받는다.
+        for t in session.query(UserToken).filter_by(user_uuid=user_uuid, device_uuid=device_uuid):
+            session.delete(t)
         session.delete(user_device)
         session.commit()
 

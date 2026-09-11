@@ -48,4 +48,27 @@ def init_db():
             conn.execute(text("ALTER TABLE device_location DROP COLUMN range_meter"))
             conn.commit()
 
+    # 게스트 초대 코드에 사전 토큰 정보를 담기 위한 컬럼 (NULL이면 토큰 발급 없음)
+    invite_cols = {c["name"] for c in inspect(engine).get_columns("invite_codes")}
+    for col, ddl in (
+        ("token_max_uses",       "ALTER TABLE invite_codes ADD COLUMN token_max_uses INTEGER"),
+        ("token_expire_minutes", "ALTER TABLE invite_codes ADD COLUMN token_expire_minutes INTEGER"),
+        ("token_not_before",     "ALTER TABLE invite_codes ADD COLUMN token_not_before DATETIME"),
+    ):
+        if col not in invite_cols:
+            with engine.connect() as conn:
+                conn.execute(text(ddl))
+                conn.commit()
+
+    # 게스트 토큰 반복 사용 규칙 (NULL이면 제약 없음)
+    token_cols = {c["name"] for c in inspect(engine).get_columns("user_tokens")}
+    for col, ddl in (
+        ("schedule_json", "ALTER TABLE user_tokens ADD COLUMN schedule_json TEXT"),
+        ("schedule_tz",   "ALTER TABLE user_tokens ADD COLUMN schedule_tz VARCHAR(64)"),
+    ):
+        if col not in token_cols:
+            with engine.connect() as conn:
+                conn.execute(text(ddl))
+                conn.commit()
+
     Session = sessionmaker(bind=engine)

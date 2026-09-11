@@ -1,13 +1,13 @@
 import { Colors } from "@/constants/theme";
 import { CustomAlert } from "@/components/custom-alert";
 import { useColorScheme } from "@/hooks/use-color-scheme";
-import { fetchRegisterInviteCode } from "@/lib/api/auth";
+import { fetchInvitePreview, fetchRegisterInviteCode, type InvitePreview } from "@/lib/api/auth";
 import { loadDevices, updateDeviceName } from "@/lib/api/devices";
 import { MAX_DEVICES_PER_USER } from "@/lib/constants";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import { useState } from "react";
-import { KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function RegisterInviteCodeScreen() {
@@ -18,6 +18,8 @@ export default function RegisterInviteCodeScreen() {
   const [loading, setLoading] = useState(false);
   const [alertConfig, setAlertConfig] = useState<{ title: string; message?: string; onClose?: () => void } | null>(null);
 
+  const [preview, setPreview] = useState<InvitePreview | null>(null);
+  const [accepting, setAccepting] = useState(false);
   const [nicknameModalVisible, setNicknameModalVisible] = useState(false);
   const [registeredDeviceUuid, setRegisteredDeviceUuid] = useState<string | null>(null);
   const [nickname, setNickname] = useState("");
@@ -35,9 +37,21 @@ export default function RegisterInviteCodeScreen() {
       return;
     }
     setLoading(true);
-    const result = await fetchRegisterInviteCode(inviteCode.trim());
+    const result = await fetchInvitePreview(inviteCode.trim());
     setLoading(false);
     if (result.type === "success") {
+      setPreview(result.data as InvitePreview);
+    } else {
+      showAlert("오류", result.message);
+    }
+  };
+
+  const handleAccept = async () => {
+    setAccepting(true);
+    const result = await fetchRegisterInviteCode(inviteCode.trim());
+    setAccepting(false);
+    if (result.type === "success") {
+      setPreview(null);
       if (result.device_uuid) {
         setRegisteredDeviceUuid(result.device_uuid);
         setNicknameModalVisible(true);
@@ -47,6 +61,12 @@ export default function RegisterInviteCodeScreen() {
     } else {
       showAlert("오류", result.message);
     }
+  };
+
+  const formatDuration = (minutes: number) => {
+    if (minutes % 1440 === 0) return `${minutes / 1440}일`;
+    if (minutes % 60 === 0) return `${minutes / 60}시간`;
+    return `${minutes}분`;
   };
 
   const handleNicknameConfirm = async () => {
@@ -65,24 +85,98 @@ export default function RegisterInviteCodeScreen() {
         </TouchableOpacity>
         <Text style={[styles.titleText, { color: colors.text }]}>초대 코드 가입</Text>
       </View>
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.body}>
-        <TextInput
-          style={[styles.input, { backgroundColor: colors.background, color: colors.text, borderColor: colors.icon }]}
-          placeholder="초대 코드 입력"
-          placeholderTextColor={colors.icon}
-          value={inviteCode}
-          onChangeText={setInviteCode}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <TouchableOpacity
-          style={[styles.button, loading && styles.buttonDisabled]}
-          onPress={handleSubmit}
-          disabled={loading}
-        >
-          <Text style={styles.buttonText}>{loading ? "처리 중..." : "확인"}</Text>
-        </TouchableOpacity>
-      </KeyboardAvoidingView>
+      {preview ? (
+        <ScrollView contentContainerStyle={styles.body}>
+          <View style={[styles.previewCard, { backgroundColor: isDark ? "#1E2124" : "#fff", borderColor: isDark ? "#2C3237" : "#E2E8F0" }]}>
+            <View style={styles.modalHeader}>
+              <MaterialCommunityIcons name="account-plus-outline" size={22} color={colors.tint} />
+              <Text style={[styles.modalTitle, { color: colors.text }]}>초대 정보</Text>
+            </View>
+
+            <View style={styles.previewRow}>
+              <Text style={[styles.previewLabel, { color: colors.icon }]}>기기</Text>
+              <Text style={[styles.previewValue, { color: colors.text }]} numberOfLines={1}>
+                {preview.device_nickname ?? "-"}
+              </Text>
+            </View>
+            <View style={styles.previewRow}>
+              <Text style={[styles.previewLabel, { color: colors.icon }]}>기기 ID</Text>
+              <Text style={[styles.previewValue, { color: colors.text }]}>{preview.device_uuid_prefix ?? "-"}</Text>
+            </View>
+            <View style={styles.previewRow}>
+              <Text style={[styles.previewLabel, { color: colors.icon }]}>부여 역할</Text>
+              <Text style={[styles.previewValue, { color: colors.text }]}>
+                {preview.role === "guest" ? "게스트" : "멤버"}
+              </Text>
+            </View>
+            <View style={styles.previewRow}>
+              <Text style={[styles.previewLabel, { color: colors.icon }]}>초대한 사람</Text>
+              <Text style={[styles.previewValue, { color: colors.text }]} numberOfLines={1}>
+                {preview.inviter_name ?? "-"}
+              </Text>
+            </View>
+            <View style={styles.previewRow}>
+              <Text style={[styles.previewLabel, { color: colors.icon }]}>코드 만료</Text>
+              <Text style={[styles.previewValue, { color: colors.text }]}>
+                {preview.expired_at ? new Date(preview.expired_at).toLocaleString() : "-"}
+              </Text>
+            </View>
+
+            {preview.role === "guest" && !!preview.token_expire_minutes && (
+              <View style={[styles.tokenBox, { backgroundColor: isDark ? "#2A2D31" : "#F9FAFB", borderColor: isDark ? "#2C3237" : "#E2E8F0" }]}>
+                <View style={styles.modalHeader}>
+                  <MaterialCommunityIcons name="key-outline" size={18} color="#3B82F6" />
+                  <Text style={[styles.tokenBoxTitle, { color: colors.text }]}>사전 발급 토큰</Text>
+                </View>
+                <Text style={[styles.modalDesc, { color: colors.icon }]}>
+                  {`${preview.token_max_uses ?? 1}회 사용 가능 · 발급 후 ${formatDuration(preview.token_expire_minutes)} 유효`}
+                </Text>
+                {!!preview.token_not_before && (
+                  <Text style={[styles.modalDesc, { color: colors.icon }]}>
+                    {`활성화: ${new Date(preview.token_not_before).toLocaleString()}`}
+                  </Text>
+                )}
+              </View>
+            )}
+          </View>
+
+          <View style={styles.modalFooter}>
+            <TouchableOpacity
+              style={[styles.button, { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6", flex: 1 }]}
+              onPress={() => setPreview(null)}
+              disabled={accepting}
+            >
+              <Text style={[styles.buttonText, { color: colors.icon }]}>취소</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.button, { flex: 1 }, accepting && styles.buttonDisabled]}
+              onPress={handleAccept}
+              disabled={accepting}
+            >
+              {accepting ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>초대 수락</Text>}
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      ) : (
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.body}>
+          <TextInput
+            style={[styles.input, { backgroundColor: colors.background, color: colors.text, borderColor: colors.icon }]}
+            placeholder="초대 코드 입력"
+            placeholderTextColor={colors.icon}
+            value={inviteCode}
+            onChangeText={setInviteCode}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity
+            style={[styles.button, loading && styles.buttonDisabled]}
+            onPress={handleSubmit}
+            disabled={loading}
+          >
+            <Text style={styles.buttonText}>{loading ? "처리 중..." : "확인"}</Text>
+          </TouchableOpacity>
+        </KeyboardAvoidingView>
+      )}
       <CustomAlert
         visible={!!alertConfig}
         title={alertConfig?.title ?? ""}
@@ -198,6 +292,26 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 19,
   },
+  previewCard: {
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 20,
+    gap: 12,
+  },
+  previewRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  previewLabel: { fontSize: 13, width: 78 },
+  previewValue: { fontSize: 14, fontWeight: "600", flex: 1, textAlign: "right" },
+  tokenBox: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 14,
+    gap: 6,
+  },
+  tokenBoxTitle: { fontSize: 14, fontWeight: "700" },
   modalFooter: {
     flexDirection: "row",
     gap: 10,

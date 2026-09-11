@@ -1,6 +1,8 @@
 import { CustomAlert } from "@/components/custom-alert";
 import { useColorScheme } from "@/hooks/use-color-scheme";
+import { fetchDevices } from "@/lib/api/devices";
 import { setupAxiosInterceptors } from "@/lib/api/interceptors";
+import { updateGeoFence } from "@/lib/background-tracking";
 import { appendFcmNotification } from "@/lib/fcm-log";
 import { registerSessionAlert } from "@/lib/session-alert";
 import "@/tasks/bg-location";
@@ -18,6 +20,18 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 setupAxiosInterceptors();
 
+// 서버가 data.type="refresh_devices"를 실어 보내는 푸시(게스트 토큰 발급·삭제, 추방).
+// 앱을 열지 않아도 토큰 캐시와 지오펜스 등록을 최신으로 맞춘다.
+const refreshDevicesFromPush = async (data?: { [key: string]: unknown }) => {
+  if (data?.type !== "refresh_devices") return;
+  try {
+    await fetchDevices();
+    await updateGeoFence();
+  } catch {
+    // 다음 앱 실행 시 홈 화면에서 다시 동기화된다
+  }
+};
+
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowBanner: true,
@@ -30,6 +44,7 @@ Notifications.setNotificationHandler({
 // 앱이 종료/백그라운드 상태일 때 수신
 setBackgroundMessageHandler(getMessaging(getApp()), async (remoteMessage) => {
   await appendFcmNotification(remoteMessage.notification?.title, remoteMessage.notification?.body);
+  await refreshDevicesFromPush(remoteMessage.data);
   const channelId = await notifee.createChannel({
     id: "default",
     name: "기본 알림",
@@ -67,6 +82,7 @@ export default function RootLayout() {
     // 앱이 포그라운드 상태일 때 수신
     const unsubscribe = onMessage(getMessaging(getApp()), async (remoteMessage) => {
       await appendFcmNotification(remoteMessage.notification?.title, remoteMessage.notification?.body);
+      await refreshDevicesFromPush(remoteMessage.data);
       const channelId = await notifee.createChannel({
         id: "default",
         name: "기본 알림",

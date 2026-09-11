@@ -1,17 +1,20 @@
+import json
 import os
 import hmac
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import secrets
 import uuid
 from flask import Blueprint, request, jsonify
 import jwt
 
 from app.utils.database import database as _db
-from app.utils.database.models import DeviceManagement, User, UserDeviceMapping, UserToken, DeviceRefreshToken, TokenBlacklist
+from app.utils.database.models import DeviceManagement, User, UserDeviceMapping, UserToken, DeviceRefreshToken, TokenBlacklist, TokenUsage
 from app.utils.crypto_utils import decrpyt_key, decrypt_data
 from app.utils.device_utils import _generate_device_secret, _issue_device_jwt, issue_device_token_pair, check_device_limit
 from app.utils.log_utils import log_activity
 from app.utils.fcm_utils import send_to_device_master, send_to_user
+from app.utils.schedule import match_window, period_key
 
 iot_bp = Blueprint("iot", __name__, url_prefix="/iot")
 
@@ -150,13 +153,37 @@ def iot_validate_token():
             UserToken.user_uuid==user.user_uuid, 
             UserToken.device_uuid==device_uuid, 
             UserToken.is_revoked==False,
-            UserToken.use_count < UserToken.max_uses,
+            (UserToken.max_uses == None) | (UserToken.use_count < UserToken.max_uses),
             (UserToken.not_before == None) | (UserToken.not_before <= now),
             UserToken.expired_at > now
             ).first()
         if token:
+            # 반복 사용 규칙(스케줄)이 있으면 요일·시간대·회차 횟수를 추가로 검증한다.
+            # 화이트리스트: 열린 창이 없으면 거부.
+            if token.schedule_json:
+                try:
+                    schedule = json.loads(token.schedule_json)
+                    local_now = now.astimezone(ZoneInfo(token.schedule_tz))
+                except (ValueError, TypeError, ZoneInfoNotFoundError):
+                    log_activity("token_schedule_error", user_uuid=user.user_uuid, device_uuid=device_uuid)
+                    return jsonify({"status": "error", "message": "Token invalid"}), 400
+
+                window, start_date = match_window(schedule, local_now)
+                if window is None:
+                    return jsonify({"status": "error", "message": "Token invalid"}), 400
+
+                key   = period_key(window, start_date)
+                usage = session.query(TokenUsage).filter_by(token_id=token.id, period_key=key).first()
+                if usage is None:
+                    usage = TokenUsage(token_id=token.id, period_key=key, uses=0)
+                    session.add(usage)
+                if usage.uses >= window["max_uses"]:
+                    return jsonify({"status": "error", "message": "Token invalid"}), 400
+                usage.uses += 1
+
             token.use_count += 1
-            if token.use_count >= token.max_uses: token.is_revoked = True
+            if token.max_uses is not None and token.use_count >= token.max_uses:
+                token.is_revoked = True
 
             user_mapping    = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid, device_uuid=device_uuid).first()
             master_mapping  = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first()

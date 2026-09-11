@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Text, BigInteger, DateTime, ForeignKey, Integer, Float, PrimaryKeyConstraint, Boolean
+from sqlalchemy import Column, String, Text, BigInteger, DateTime, ForeignKey, Integer, Float, PrimaryKeyConstraint, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from app.utils.database.database import Base
@@ -46,15 +46,35 @@ class UserToken(Base):
     token_value = Column(String(255), nullable=False, unique=True)
     user_uuid   = Column(String(50), ForeignKey("users.user_uuid", ondelete="CASCADE"), nullable=False)
     device_uuid = Column(String(50), ForeignKey("device_management.device_uuid", ondelete="CASCADE"), nullable=False)
-    max_uses    = Column(Integer, default=1)
+    # NULL = 전체 횟수 제한 없음(스케줄 토큰). default를 두면 SQLAlchemy가 None을
+    # "값 없음"으로 보고 기본값을 채워 무제한 토큰이 1회용이 되므로 두지 않는다.
+    max_uses    = Column(Integer, nullable=True)
     use_count   = Column(Integer, default=0)
     is_revoked = Column(Boolean, default=False, nullable=False)
     not_before  = Column(DateTime, nullable=True)
     expired_at  = Column(DateTime, nullable=False)
+    # 반복 사용 규칙(요일·시간대·회차별 횟수). NULL이면 제약 없음.
+    schedule_json = Column(Text, nullable=True)
+    schedule_tz   = Column(String(64), nullable=True)
     created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = relationship("User", back_populates="user_tokens")
     device = relationship("DeviceManagement", back_populates="user_tokens")
+    usages = relationship("TokenUsage", back_populates="token", cascade="all, delete-orphan")
+
+
+class TokenUsage(Base):
+    """스케줄 창 회차별 사용 횟수. period_key = "<창 시작 로컬 날짜>#<window id>"."""
+    __tablename__ = "token_usages"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    token_id   = Column(Integer, ForeignKey("user_tokens.id", ondelete="CASCADE"), nullable=False)
+    period_key = Column(String(32), nullable=False)
+    uses       = Column(Integer, default=0, nullable=False)
+
+    token = relationship("UserToken", back_populates="usages")
+
+    __table_args__ = (UniqueConstraint("token_id", "period_key", name="uq_token_period"),)
 
 
 class DeviceManagement(Base):
@@ -111,6 +131,11 @@ class InviteCode(Base):
     is_used     = Column(Boolean, default=False)
     expired_at   = Column(DateTime, nullable=True)
     created_at   = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # 게스트 초대 시 미리 지정하는 토큰 정보 (NULL이면 가입 시 토큰 발급 안 함)
+    token_max_uses       = Column(Integer, nullable=True)
+    token_expire_minutes = Column(Integer, nullable=True)
+    token_not_before     = Column(DateTime, nullable=True)
 
     device  = relationship("DeviceManagement", back_populates="invite_codes", foreign_keys=[device_uuid])
     creator = relationship("User", back_populates="invite_codes", foreign_keys=[creator_uuid])

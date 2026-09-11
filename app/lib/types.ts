@@ -1,3 +1,5 @@
+import type { Schedule } from "./schedule";
+
 export type IoTDevice = {
   device_uuid: string;
   device_nickname: string;
@@ -10,10 +12,13 @@ export type IoTDevice = {
   };
   auth_token: {
     token_value: string;
-    max_uses: number;
+    max_uses: number | null;
     use_count: number;
     not_before: string;
     expired_at: string;
+    // 이전 버전 캐시에는 없을 수 있다
+    schedule?: Schedule | null;
+    schedule_tz?: string | null;
   } | null;
   location: {
     latitude: number;

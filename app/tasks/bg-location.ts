@@ -6,6 +6,7 @@ import {
   BG_GEOFENCE_TASK,
   DEVICE_STATUS_KEY,
 } from "@/lib/constants";
+import { isTokenAlive, isTokenUsableNow } from "@/lib/schedule";
 import { appendSystemLog } from "@/lib/system-log";
 import { getTokenSecure, setTokenSecure } from "@/lib/token-storage";
 import { DeviceStatus, IoTDevice } from "@/lib/types";
@@ -16,8 +17,13 @@ import * as TaskManager from "expo-task-manager";
 // 그 뒤로는 저전력 스캔으로 내려 exit까지 계속 감시한다.
 // (짧은 타임아웃을 쓰면 반경 안에 상주하다 나중에 문 앞으로 갔을 때 스캔이 이미 꺼져 있다)
 const BLE_BURST_MS = 2 * 60 * 1000;
-const BLE_MAX_TRACKING_MS = 12 * 60 * 60 * 1000; // exit 이벤트가 유실될 때를 위한 안전 상한
+// exit 이벤트가 유실될 때를 위한 안전 상한. 반경 안에 이보다 오래 머물면 자동 BLE가 멈추고
+// 진입 이벤트가 다시 오지 않으므로(스케줄 대기 포함) 수동 인증으로 연다.
+// TODO: 추후 사용자 설정으로 변경 가능하게 추가할 예정
+const BLE_MAX_TRACKING_MS = 60 * 60 * 1000;
 const BLE_RETRY_INTERVAL_MS = 5000;
+// 스케줄 시간대 밖(또는 활성화 시각 전)에는 스캔하지 않고 이 주기로 시각만 다시 본다.
+const BLE_SCHEDULE_POLL_MS = 60 * 1000;
 
 const bleInProgress = new Set<string>();
 const bleTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -107,8 +113,9 @@ const stopBleTracking = (uuid: string) => {
   bleTimers.delete(uuid);
 };
 
-const startBleTracking = async (device: IoTDevice) => {
-  const uuid = device.device_uuid;
+const startBleTracking = async (initialDevice: IoTDevice) => {
+  const uuid = initialDevice.device_uuid;
+  let device = initialDevice;
   if (bleInProgress.has(uuid)) return;
   bleInProgress.add(uuid);
   bleAbort.delete(uuid);
@@ -116,11 +123,38 @@ const startBleTracking = async (device: IoTDevice) => {
 
   appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble tracking start (geofence enter)" });
 
-  const startedAt = Date.now();
+  let startedAt = Date.now();
   let lastBurst: boolean | null = null;
+  let waiting = false;
 
   try {
     while (!bleAbort.has(uuid)) {
+      // 대기·재시도 중에 토큰이 삭제·재발급될 수 있어 캐시에서 최신 값을 다시 읽는다
+      // (푸시로 갱신된 캐시를 반영. 지오펜스 해제는 exit 이벤트를 주지 않는다)
+      const latest = (await loadDevices()).find((d) => d.device_uuid === uuid);
+      if (!latest || !isTokenAlive(latest.auth_token)) {
+        appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble tracking stopped: token gone" });
+        break;
+      }
+      device = latest;
+
+      if (!isTokenUsableNow(device.auth_token)) {
+        if (!waiting) {
+          waiting = true;
+          lastBurst = null;
+          void setBleScanning(uuid, null);
+          appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble waiting for schedule window" });
+        }
+        await new Promise((resolve) => setTimeout(resolve, BLE_SCHEDULE_POLL_MS));
+        continue;
+      }
+      if (waiting) {
+        // 시간대가 열리면 진입 직후처럼 고반응 스캔부터 다시 시작한다
+        waiting = false;
+        startedAt = Date.now();
+        appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble schedule window opened" });
+      }
+
       const burst = Date.now() - startedAt < BLE_BURST_MS;
       // 스캔 모드가 바뀔 때만 알림을 갱신한다 (스캔 시작 시 1회 + burst 종료 시 1회)
       if (burst !== lastBurst) {
@@ -198,8 +232,8 @@ TaskManager.defineTask(BG_GEOFENCE_TASK, async ({ data, error }) => {
     const devices = await loadDevices();
     const device = devices.find((d) => d.device_uuid === uuid);
     if (!device) return;
-    if (!device.auth_token) {
-      appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble tracking skipped: auth_token is null" });
+    if (!isTokenAlive(device.auth_token)) {
+      appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble tracking skipped: no valid auth_token" });
       return;
     }
     void startBleTracking(device);

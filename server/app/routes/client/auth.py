@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet
 from flask import Blueprint, request, jsonify
-from app.utils.database.models import InviteCode, UserDeviceMapping
+from app.utils.database.models import InviteCode, UserDeviceMapping, UserToken
 from app.utils.device_utils import check_device_limit
 import jwt
 
@@ -164,6 +164,60 @@ def get_secret_key():
 
     return jsonify({"secret_key": raw_hex}), 200
 
+# GET /auth/invite-code/preview
+@auth_bp.route("/invite-code/preview", methods=["GET"])
+def preview_invite_code():
+    """초대 코드를 소모하지 않고 가입 대상 기기 정보만 조회한다."""
+    payload, err = verify_access_token(request.headers.get("Authorization", ""))
+    if err:
+        return jsonify({"status": "error", "message": "invalid token"}), 401
+
+    user_uuid   = payload["sub"]
+    invite_code = (request.args.get("invite_code") or "").strip()
+
+    if not invite_code:
+        return jsonify({"status": "error", "message": "invalid payload"}), 400
+
+    now = datetime.now(timezone.utc)
+    with _db.Session() as session:
+        invite_row = session.query(InviteCode).filter_by(
+            invite_code=invite_code, is_used=False
+        ).filter(InviteCode.expired_at > now).first()
+        if not invite_row:
+            return jsonify({"status": "error", "reason": "invalid", "message": "invalid invite code"}), 404
+
+        device_uuid = invite_row.device_uuid
+
+        existing = session.query(UserDeviceMapping).filter_by(
+            device_uuid=device_uuid, user_uuid=user_uuid
+        ).first()
+        if existing:
+            return jsonify({"status": "error", "reason": "already_joined", "message": "already joined"}), 409
+
+        if not check_device_limit(session, user_uuid):
+            return jsonify({"status": "error", "reason": "device_limit", "message": "device limit exceeded"}), 409
+
+        master = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first()
+
+        data = {
+            "device_uuid_prefix": device_uuid[:8] if device_uuid else None,
+            "device_nickname":    (master.device_nickname if master else None) or (device_uuid[:8] if device_uuid else None),
+            "role":               invite_row.role,
+            "display_name":       invite_row.display_name,
+            "inviter_name":       master.display_name if master else None,
+            "expired_at":         invite_row.expired_at.isoformat() + "Z" if invite_row.expired_at else None,
+        }
+
+        if invite_row.role == "guest":
+            data.update({
+                "token_max_uses":       invite_row.token_max_uses,
+                "token_expire_minutes": invite_row.token_expire_minutes,
+                "token_not_before":     invite_row.token_not_before.isoformat() + "Z" if invite_row.token_not_before else None,
+            })
+
+        return jsonify({"status": "success", "data": data}), 200
+
+
 # POST /auth/join
 @auth_bp.route("/join", methods=["POST"])
 def join_device():
@@ -209,6 +263,18 @@ def join_device():
             display_name = display_name,
         )
         session.add(new_mapping)
+
+        # 초대 코드에 사전 토큰 정보가 있으면 가입과 동시에 게스트 토큰을 발급한다.
+        if role == "guest" and invite_row.token_expire_minutes:
+            session.add(UserToken(
+                token_value = secrets.token_urlsafe(32),
+                user_uuid   = user_uuid,
+                device_uuid = device_uuid,
+                max_uses    = invite_row.token_max_uses or 1,
+                not_before  = invite_row.token_not_before,
+                expired_at  = now + timedelta(minutes=invite_row.token_expire_minutes),
+            ))
+
         session.commit()
 
         log_activity("member_joined", user_uuid=user_uuid, device_uuid=device_uuid)

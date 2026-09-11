@@ -4,7 +4,16 @@ import { getTokenSecure } from "../token-storage";
 import { getApiErrorMessage } from "./errors";
 
 // POST /client/invite-code     body: { device_uuid, display_name }
-export const createInviteCode = async (device_uuid: String, display_name: String, role: String) => {
+export const createInviteCode = async (
+  device_uuid: String,
+  display_name: String,
+  role: String,
+  tokenOptions?: {
+    token_max_uses?: number;
+    token_expire_minutes?: number;
+    token_not_before?: string;
+  },
+) => {
   const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
   if (!access_token) {
     return { type: "forbidden", message: "access token이 없습니다." };
@@ -13,7 +22,7 @@ export const createInviteCode = async (device_uuid: String, display_name: String
   try {
     const response = await axios.post(
       `${BACKEND_URL}/client/invite-code`,
-      { device_uuid: device_uuid, display_name: display_name, role: role },
+      { device_uuid: device_uuid, display_name: display_name, role: role, ...(tokenOptions ?? {}) },
       { headers: { Authorization: `Bearer ${access_token}` }, timeout: 5000 },
     );
     return { type: "success", data: response.data.data };
@@ -116,6 +125,8 @@ export const createGuestToken = async (
   max_uses?: number,
   not_before?: string,
   expire_minutes?: number,
+  schedule?: { windows: { id: number; days: string[]; start: string; end: string; max_uses: number }[] },
+  tz?: string,
 ) => {
   const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
   if (!access_token) {
@@ -125,7 +136,7 @@ export const createGuestToken = async (
   try {
     const response = await axios.post(
       `${BACKEND_URL}/client/guest-token`,
-      { device_uuid, guest_uuid, max_uses, not_before, expire_minutes },
+      { device_uuid, guest_uuid, max_uses, not_before, expire_minutes, schedule, tz },
       { headers: { Authorization: `Bearer ${access_token}` }, timeout: 5000 },
     );
     return { type: "success", data: response.data.data };
