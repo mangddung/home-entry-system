@@ -7,6 +7,7 @@ import * as TaskManager from "expo-task-manager";
 import { loadDevices } from "./api/devices";
 import {
   BG_GEOFENCE_TASK,
+  BG_LOCATION_TASK,
   GEOFENCE_RADIUS_M,
 } from "./constants";
 import { appendSystemLog } from "./system-log";
@@ -209,4 +210,21 @@ export const updateGeoFence = async () => {
     await cancelTrackingNotification();
   }
   lastGeoFenceSignature = signature;
+};
+
+// 로그아웃 시 백그라운드 추적을 전부 내린다.
+// 시그니처 캐시도 비워야 같은 기기 목록으로 다시 로그인했을 때 updateGeoFence()가 재등록을 건너뛰지 않는다.
+export const stopBackgroundTracking = async () => {
+  lastGeoFenceSignature = "";
+  try {
+    if (await TaskManager.isTaskRegisteredAsync(BG_LOCATION_TASK)) {
+      await Location.stopLocationUpdatesAsync(BG_LOCATION_TASK);
+    }
+    if (await TaskManager.isTaskRegisteredAsync(BG_GEOFENCE_TASK)) {
+      await Location.stopGeofencingAsync(BG_GEOFENCE_TASK);
+    }
+  } catch {
+    // 실제로 실행 중이 아니면 무시
+  }
+  await cancelTrackingNotification();
 };

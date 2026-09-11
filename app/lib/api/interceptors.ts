@@ -1,10 +1,6 @@
 import axios from "axios";
-import * as Location from "expo-location";
 import { router } from "expo-router";
-import * as TaskManager from "expo-task-manager";
 import {
-  BG_GEOFENCE_TASK,
-  BG_LOCATION_TASK,
   CURRENT_LOCATION_KEY,
   DEVICE_STATUS_KEY,
   IS_ONLINE_KEY,
@@ -16,9 +12,10 @@ import {
   USER_SECRET_KEY,
   USER_UUID_KEY,
 } from "../constants";
-import { cancelTrackingNotification } from "../background-tracking";
+import { stopBackgroundTracking } from "../background-tracking";
 import { triggerSessionAlert } from "../session-alert";
-import { setTokenSecure } from "../token-storage";
+import { getTokenSecure, setTokenSecure } from "../token-storage";
+import { refreshToken } from "./auth";
 import { clearDeviceStorage } from "./devices";
 
 async function clearSession() {
@@ -35,21 +32,43 @@ async function clearSession() {
     setTokenSecure(CURRENT_LOCATION_KEY, ""),
     setTokenSecure(DEVICE_STATUS_KEY, ""),
   ]);
-  try {
-    const isRegistered = await TaskManager.isTaskRegisteredAsync(BG_LOCATION_TASK);
-    if (isRegistered) await Location.stopLocationUpdatesAsync(BG_LOCATION_TASK);
-    const isGeofenceRegistered = await TaskManager.isTaskRegisteredAsync(BG_GEOFENCE_TASK);
-    if (isGeofenceRegistered) await Location.stopGeofencingAsync(BG_GEOFENCE_TASK);
-    await cancelTrackingNotification();
-  } catch {}
+  await stopBackgroundTracking();
 }
 
 let isHandling401 = false;
+
+// 동시에 401을 받은 요청들이 refresh를 각각 호출하지 않도록 한 번만 수행하고 결과를 공유한다.
+let refreshPromise: Promise<boolean> | null = null;
+
+async function refreshOnce(): Promise<boolean> {
+  if (!refreshPromise) {
+    refreshPromise = refreshToken()
+      .then((result) => result.type === "success")
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
+}
 
 export function setupAxiosInterceptors() {
   axios.interceptors.response.use(
     (response) => response,
     async (error) => {
+      const config = error.config as (typeof error.config & { _retried?: boolean }) | undefined;
+      const isRefreshCall = typeof config?.url === "string" && config.url.includes("/auth/refresh");
+
+      if (error.response?.status === 401 && config && !config._retried && !isRefreshCall) {
+        config._retried = true;
+        if (await refreshOnce()) {
+          const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
+          if (access_token) {
+            config.headers = { ...config.headers, Authorization: `Bearer ${access_token}` };
+          }
+          return axios(config);
+        }
+      }
+
       if (error.response?.status === 401 && !isHandling401) {
         isHandling401 = true;
         triggerSessionAlert("세션 만료", "로그인이 필요합니다. 다시 로그인해주세요.", async () => {
