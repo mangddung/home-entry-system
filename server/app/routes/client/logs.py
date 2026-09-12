@@ -1,3 +1,5 @@
+import json
+
 from flask import Blueprint, request, jsonify
 
 from app.utils.database import database as _db
@@ -16,6 +18,19 @@ EXCLUDED_ACTIONS = [
     "device_ping",
 ]
 
+
+def _display_name(user_uuid, detail, name_map):
+    """이름은 매핑에서 읽지만, 탈퇴·추방으로 매핑이 사라진 사용자는 로그에 남은 이름으로 채운다."""
+    if not user_uuid:
+        return None
+    if name_map.get(user_uuid):
+        return name_map[user_uuid]
+    try:
+        name = (json.loads(detail) or {}).get("display_name") if detail else None
+    except (ValueError, TypeError):
+        name = None
+    return name or f"탈퇴한 사용자({user_uuid[:8]})"
+
 # GET /client/logs
 @logs_bp.route("/logs", methods=["GET"])
 def get_logs():
@@ -31,8 +46,8 @@ def get_logs():
         return jsonify({"status": "error", "message": "invalid payload"}), 400
 
     with _db.Session() as session:
-        master = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, user_uuid=user_uuid, role="master").first()
-        if not master:
+        mapping = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, user_uuid=user_uuid).first()
+        if not mapping:
             return jsonify({"status": "error", "message": "forbidden"}), 403
 
         query = session.query(ActivityLog).filter(
@@ -40,7 +55,13 @@ def get_logs():
             ActivityLog.action.notin_(EXCLUDED_ACTIONS)
         )
 
-        if category in CATEGORY_PATTERNS:
+        # 마스터가 아니면 카테고리와 무관하게 본인 출입 기록만 본다(프런트 탭이 아니라 여기서 막는다)
+        if mapping.role != "master":
+            query = query.filter(
+                ActivityLog.action == CATEGORY_PATTERNS["access"],
+                ActivityLog.user_uuid == user_uuid,
+            )
+        elif category in CATEGORY_PATTERNS:
             pattern = CATEGORY_PATTERNS[category]
             if "%" in pattern:
                 query = query.filter(ActivityLog.action.like(pattern))
@@ -56,7 +77,7 @@ def get_logs():
             "id":           l.id,
             "action":       l.action,
             "user_uuid":    l.user_uuid,
-            "display_name": display_name_map.get(l.user_uuid) if l.user_uuid else None,
+            "display_name": _display_name(l.user_uuid, l.detail, display_name_map),
             "detail":       l.detail,
             "created_at":   l.created_at.isoformat() + "Z" if l.created_at else None,
         } for l in logs]

@@ -32,11 +32,13 @@ from app.utils.database.models import User, DeviceManagement, UserDeviceMapping,
 from app.routes.client.auth import auth_bp
 from app.routes.client.members import member_bp
 from app.routes.client.devices import client_bp
+from app.routes.client.logs import logs_bp
 
 app = Flask(__name__)
 app.register_blueprint(auth_bp)
 app.register_blueprint(member_bp)
 app.register_blueprint(client_bp)
+app.register_blueprint(logs_bp)
 c = app.test_client()
 
 MASTER, GUEST, DEV = "u-master", "u-guest", "dev-0001"
@@ -177,6 +179,43 @@ sent.clear()
 assert c.post("/client/device-location", json={**loc, "latitude": 37.6}, headers=MH).status_code == 200
 assert sorted(sent) == [(MASTER, "refresh_devices"), (MEMBER, "refresh_devices")], sent
 print("[ok] 위치 갱신 시 refresh_devices 푸시")
+
+# 8) 로그 열람 권한: 마스터는 전체, 멤버는 본인 출입 기록만
+from app.utils.database.models import ActivityLog
+from app.utils.log_utils import log_activity
+log_activity("token_validated", user_uuid=MEMBER, device_uuid=DEV)
+log_activity("token_validated", user_uuid=MASTER, device_uuid=DEV)
+log_activity("member_kicked", user_uuid=MASTER, device_uuid=DEV, detail={"role": "guest", "display_name": "손님"})
+
+MEMBER_JTI = str(uuid.uuid4())
+with _db.Session() as s:
+    s.query(User).filter_by(user_uuid=MEMBER).update({"current_jti": MEMBER_JTI})
+    s.commit()
+EH = {"Authorization": f"Bearer {tok(MEMBER, MEMBER_JTI)}"}
+
+r = c.get(f"/client/logs?device_uuid={DEV}&category=member", headers=EH)
+assert r.status_code == 200, r.get_json()
+rows = r.get_json()["data"]
+assert [(x["action"], x["user_uuid"]) for x in rows] == [("token_validated", MEMBER)], rows
+print("[ok] 멤버는 카테고리와 무관하게 본인 출입 기록만 열람")
+
+r = c.get(f"/client/logs?device_uuid={DEV}&category=access", headers=MH)
+assert sorted(x["user_uuid"] for x in r.get_json()["data"]) == [MASTER, MEMBER], r.get_json()
+print("[ok] 마스터는 전체 출입 기록 열람")
+
+# 9) 탈퇴로 매핑이 사라져도 로그에 남은 이름으로 표시 (이름이 없는 옛 로그는 대체 문구)
+log_activity("token_validated", user_uuid=MEMBER, device_uuid=DEV, detail={"display_name": "멤버"})
+assert c.delete(f"/client/device-membership?device_uuid={DEV}", headers=EH).status_code == 200
+r = c.get(f"/client/logs?device_uuid={DEV}", headers=MH)
+rows = {(x["action"], x["display_name"]) for x in r.get_json()["data"] if x["user_uuid"] == MEMBER}
+assert ("token_validated", "멤버") in rows, rows                       # detail에 남긴 이름
+assert ("member_leaved", "멤버") in rows, rows                         # 탈퇴 로그도 이름 유지
+assert ("token_validated", f"탈퇴한 사용자({MEMBER[:8]})") in rows, rows  # detail 없는 옛 로그
+print("[ok] 탈퇴자 이름 표시 (로그 기록값 우선, 없으면 대체 문구)")
+
+with _db.Session() as s:
+    s.add(UserDeviceMapping(user_uuid=MEMBER, device_uuid=DEV, display_name="멤버", role="member"))
+    s.commit()
 
 sent.clear()
 assert c.delete(f"/client/device?device_uuid={DEV}", headers=MH).status_code == 200

@@ -323,6 +323,7 @@ def delete_device_membership():
             return jsonify({"status": "error", "message": "master cannot leave, delete the device instead"}), 403
 
         user_display_name = user_device.display_name or user_uuid[:8]
+        user_role = user_device.role
         user_nickname = user_device.device_nickname or device_uuid[:8] if user_device.device_nickname else device_uuid[:8]
 
         master_mapping  = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first()
@@ -336,7 +337,8 @@ def delete_device_membership():
         session.delete(user_device)
         session.commit()
 
-        log_activity("member_leaved", user_uuid=user_uuid, device_uuid=device_uuid)
+        log_activity("member_leaved", user_uuid=user_uuid, device_uuid=device_uuid,
+                     detail={"display_name": user_display_name, "role": user_role})
         send_to_user(user_uuid, f"{user_nickname} 기기 알림", f"그룹을 떠났습니다")      
         if master_uuid:
             send_to_user(master_uuid, f"{master_nickname} 기기 알림", f"{user_display_name}가 그룹을 떠났습니다")  

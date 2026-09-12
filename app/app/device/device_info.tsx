@@ -99,8 +99,31 @@ function getActionLabel(action: string): string {
     member_added: "멤버 추가",
     member_removed: "멤버 제거",
     member_role_updated: "역할 변경",
+    member_invite_code_created: "초대 코드 생성",
+    member_invite_code_deleted: "초대 코드 삭제",
+    member_kicked: "멤버 추방",
+    member_leaved: "그룹 탈퇴",
+    member_guest_token_created: "게스트 토큰 발급",
+    member_guest_token_deleted: "게스트 토큰 삭제",
+    member_token_generated: "멤버 토큰 발급",
+    device_location_added: "기기 위치 등록",
+    device_location_updated: "기기 위치 변경",
   };
   return map[action] ?? action;
+}
+
+// 서버가 detail을 JSON 문자열로 저장한다. 그대로 찍으면 {"role": ...}가 노출되므로 풀어서 보여준다.
+function formatLogDetail(detail: string | null): string | null {
+  if (!detail) return null;
+  try {
+    const parsed = JSON.parse(detail) as Record<string, string>;
+    const roleLabel =
+      parsed.role === "master" ? "마스터" : parsed.role === "guest" ? "게스트" : parsed.role === "member" ? "멤버" : null;
+    const target = [parsed.display_name, roleLabel && `(${roleLabel})`].filter(Boolean).join(" ");
+    return target || null;
+  } catch {
+    return detail;
+  }
 }
 
 function formatLogTime(iso: string | null): string {
@@ -385,8 +408,10 @@ export default function DeviceInfoView() {
 
   const openActivityLog = async () => {
     if (!device) return;
+    const tab = device.role === "master" ? activityLogTab : "access";
+    setActivityLogTab(tab);
     setIsActivityLogOpen(true);
-    await loadActivityLogs(activityLogTab, device.device_uuid);
+    await loadActivityLogs(tab, device.device_uuid);
   };
 
   const handleManualAuth = async () => {
@@ -1258,14 +1283,12 @@ export default function DeviceInfoView() {
                   {pingLabel}
                 </Text>
               </View>
-              {device.role === "master" && (
-                <TouchableOpacity
-                  style={[styles.cardActionBtn, { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" }]}
-                  onPress={openActivityLog}
-                >
-                  <MaterialCommunityIcons name="text-box-search-outline" size={15} color={colors.tabIconDefault} />
-                </TouchableOpacity>
-              )}
+              <TouchableOpacity
+                style={[styles.cardActionBtn, { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" }]}
+                onPress={openActivityLog}
+              >
+                <MaterialCommunityIcons name="text-box-search-outline" size={15} color={colors.tabIconDefault} />
+              </TouchableOpacity>
             </View>
           </View>
         </View>
@@ -2200,13 +2223,15 @@ export default function DeviceInfoView() {
         <Pressable style={styles.activityLogBackdrop} onPress={() => setIsActivityLogOpen(false)}>
           <Pressable style={[styles.activityLogSheet, { backgroundColor: modalBg }]} onPress={() => {}}>
             <View style={[styles.activityLogHeader, { borderBottomColor: cardBorder }]}>
-              <Text style={[styles.activityLogTitle, { color: colors.text }]}>활동 로그</Text>
+              <Text style={[styles.activityLogTitle, { color: colors.text }]}>
+                {device?.role === "master" ? "활동 로그" : "내 출입 기록"}
+              </Text>
               <TouchableOpacity onPress={() => setIsActivityLogOpen(false)}>
                 <MaterialCommunityIcons name="close" size={20} color={colors.tabIconDefault} />
               </TouchableOpacity>
             </View>
 
-            <View style={styles.activityLogTabs}>
+            <View style={[styles.activityLogTabs, device?.role !== "master" && { display: "none" }]}>
               {(["device", "access", "member"] as const).map((tab) => {
                 const label = tab === "device" ? "기기" : tab === "access" ? "출입" : "멤버";
                 const active = activityLogTab === tab;
@@ -2249,7 +2274,9 @@ export default function DeviceInfoView() {
                     </View>
                     {(log.display_name || log.detail) && (
                       <Text style={[styles.activityLogSub, { color: colors.tabIconDefault }]} numberOfLines={2}>
-                        {[log.display_name, log.detail].filter(Boolean).join(" · ")}
+                        {Array.from(
+                          new Set([log.display_name, formatLogDetail(log.detail)].filter(Boolean)),
+                        ).join(" · ")}
                       </Text>
                     )}
                   </View>
