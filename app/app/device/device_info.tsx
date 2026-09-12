@@ -465,6 +465,9 @@ export default function DeviceInfoView() {
     setGuestTokenLoading(false);
     if (result.type === "success") {
       handleGuestTokenClose();
+      // 상세 시트가 열린 채라면 발급된 토큰 목록을 다시 불러온다.
+      setSelectedMember((m) => (m ? { ...m } : m));
+      void refreshMembers();
       showAlert("완료", "게스트 토큰이 발급되었습니다.");
     } else {
       showAlert("오류", result.message ?? "오류가 발생했습니다.");
@@ -518,6 +521,7 @@ export default function DeviceInfoView() {
           const result = await deleteMemberFromTeam(member.user_uuid, device.device_uuid);
           if (result.type === "success") {
             setDeviceMember((prev) => prev.filter((m) => m.user_uuid !== member.user_uuid));
+            setSelectedMember(null);
           } else {
             showAlert("삭제 실패", result.message ?? "오류가 발생했습니다.");
           }
@@ -1410,7 +1414,10 @@ export default function DeviceInfoView() {
               {[...deviceMember]
                 .sort((a, b) => {
                   const order: Record<string, number> = { master: 0, member: 1, guest: 2 };
-                  return (order[a.role] ?? 3) - (order[b.role] ?? 3);
+                  const diff = (order[a.role] ?? 3) - (order[b.role] ?? 3);
+                  if (diff !== 0) return diff;
+                  // 같은 역할군 안에서만 본인을 위로
+                  return (a.user_uuid === myUuid ? 0 : 1) - (b.user_uuid === myUuid ? 0 : 1);
                 })
                 .map((member) => {
                   const role = getRoleStyle(member.role, isDark);
@@ -1429,6 +1436,16 @@ export default function DeviceInfoView() {
                         {member.display_name}
                       </Text>
                       <View style={styles.memberCardRight}>
+                        {member.has_token === false && (
+                          <View
+                            style={[
+                              styles.rolePill,
+                              { backgroundColor: isDark ? "rgba(245,158,11,0.15)" : "#FEF3C7" },
+                            ]}
+                          >
+                            <Text style={[styles.rolePillText, { color: "#B45309" }]}>토큰 없음</Text>
+                          </View>
+                        )}
                         <View style={[styles.rolePill, { backgroundColor: role.bg }]}>
                           <Text style={[styles.rolePillText, { color: role.color }]}>
                             {role.label}
@@ -2118,6 +2135,7 @@ export default function DeviceInfoView() {
                                             const result = await deleteGuestToken(device.device_uuid, t.id);
                                             if (result.type === "success") {
                                               setSelectedMemberTokens((prev) => prev.filter((tk) => tk.id !== t.id));
+                                              void refreshMembers();
                                             } else {
                                               showAlert("오류", result.message ?? "삭제에 실패했습니다.");
                                             }
@@ -2151,10 +2169,7 @@ export default function DeviceInfoView() {
                     {selectedMember.role === "guest" && !hasActiveToken && (
                       <TouchableOpacity
                         style={[styles.memberDetailActionBtn, { backgroundColor: isDark ? "rgba(59,130,246,0.12)" : "#EFF6FF" }]}
-                        onPress={() => {
-                          setSelectedMember(null);
-                          setGuestTokenTarget(selectedMember);
-                        }}
+                        onPress={() => setGuestTokenTarget(selectedMember)}
                       >
                         <MaterialCommunityIcons name="key-outline" size={18} color="#3B82F6" />
                         <Text style={{ fontSize: 14, fontWeight: "600", color: "#3B82F6" }}>게스트 토큰 발급</Text>
@@ -2162,10 +2177,7 @@ export default function DeviceInfoView() {
                     )}
                     <TouchableOpacity
                       style={[styles.memberDetailActionBtn, { backgroundColor: isDark ? "rgba(239,68,68,0.12)" : "#FEF2F2" }]}
-                      onPress={() => {
-                        setSelectedMember(null);
-                        handleDeleteMember(selectedMember);
-                      }}
+                      onPress={() => handleDeleteMember(selectedMember)}
                     >
                       <MaterialCommunityIcons name="account-remove-outline" size={18} color="#EF4444" />
                       <Text style={{ fontSize: 14, fontWeight: "600", color: "#EF4444" }}>멤버 추방</Text>

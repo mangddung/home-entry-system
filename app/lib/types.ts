@@ -57,4 +57,6 @@ export type MemberInfo = {
   role: string;
   display_name: string;
   created_at: Date;
+  // 게스트 행에만, 마스터가 조회할 때만 내려온다.
+  has_token?: boolean;
 };

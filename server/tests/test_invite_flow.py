@@ -72,6 +72,14 @@ r = c.post("/client/invite-code", json={"device_uuid": DEV, "display_name": "x",
 assert r.status_code == 400, r.get_json()
 print("[ok] 잘못된 토큰 옵션 400")
 
+# 중복 표시 이름 거부: 대기 중인 초대 코드와 겹칠 때
+r = c.post("/client/invite-code", json={"device_uuid": DEV, "display_name": "손님", "role": "member"}, headers=MH)
+assert r.status_code == 409, r.get_json()
+# 대소문자만 다른 경우도 거부 + 기존 멤버 이름과 겹칠 때도 거부
+r = c.post("/client/invite-code", json={"device_uuid": DEV, "display_name": "마스터", "role": "member"}, headers=MH)
+assert r.status_code == 409, r.get_json()
+print("[ok] 중복 표시 이름 409")
+
 # 2) 미리보기 – 코드 소모 없이 정보 조회
 r = c.get(f"/auth/invite-code/preview?invite_code={code}", headers=GH)
 assert r.status_code == 200, r.get_json()
@@ -106,6 +114,22 @@ print("[ok] 이미 가입한 기기는 already_joined")
 r = c.get(f"/client/guest-token?device_uuid={DEV}&guest_uuid={GUEST}", headers=GH)
 assert r.status_code == 200 and len(r.get_json()["data"]) == 1, r.get_json()
 print("[ok] 게스트 본인 토큰 조회")
+
+# 멤버 목록: 마스터에게만 게스트 토큰 보유 여부 노출
+r = c.get(f"/client/member?device_uuid={DEV}", headers=MH)
+rows = {m["user_uuid"]: m for m in r.get_json()["data"]}
+assert rows[GUEST]["has_token"] is True, rows
+assert "has_token" not in rows[MASTER], rows
+with _db.Session() as s2:
+    s2.query(UserToken).filter_by(user_uuid=GUEST, device_uuid=DEV).update({"is_revoked": True})
+    s2.commit()
+r = c.get(f"/client/member?device_uuid={DEV}", headers=MH)
+rows = {m["user_uuid"]: m for m in r.get_json()["data"]}
+assert rows[GUEST]["has_token"] is False, rows
+# 게스트 본인이 조회하면 필드 없음
+r = c.get(f"/client/member?device_uuid={DEV}", headers=GH)
+assert all("has_token" not in m for m in r.get_json()["data"]), r.get_json()
+print("[ok] 멤버 목록 has_token 노출 규칙")
 
 # 남의 토큰은 여전히 금지
 r = c.get(f"/client/guest-token?device_uuid={DEV}&guest_uuid={MASTER}", headers=GH)

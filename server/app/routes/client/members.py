@@ -11,6 +11,7 @@ from app.utils.database import UserDeviceMapping, DeviceManagement, UserToken
 from app.utils.database.models import DeviceLocation, InviteCode, Settings, TokenUsage, User
 from app.utils.fcm_utils import send_to_user
 from app.utils.log_utils import log_activity
+from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 from app.routes.client.auth import verify_access_token
 from app.utils.schedule import validate_schedule, windows_for_date, period_key
@@ -82,10 +83,28 @@ def create_invite_code():
         if not mapping:
             return jsonify({"status": "error", "message": "not found mapping"}), 401
         
+        # 같은 기기 안에서 표시 이름이 겹치면 멤버 목록에서 구분이 안 되므로 막는다.
+        # (대소문자 무시. ponytail: 마스터 1명만 발급하므로 동시성 경합은 무시, 잦아지면 유니크 인덱스 추가)
+        name_key = display_name.lower()
+        dup_member = session.query(UserDeviceMapping).filter(
+            UserDeviceMapping.device_uuid == device_uuid,
+            func.lower(UserDeviceMapping.display_name) == name_key,
+        ).first()
+        if dup_member:
+            return jsonify({"status": "error", "message": "이미 같은 이름의 멤버가 있습니다."}), 409
+
+        dup_invite = session.query(InviteCode).filter(
+            InviteCode.device_uuid == device_uuid,
+            InviteCode.is_used == False,
+            InviteCode.expired_at > now,
+            func.lower(InviteCode.display_name) == name_key,
+        ).first()
+        if dup_invite:
+            return jsonify({"status": "error", "message": "같은 이름으로 발급된 초대 코드가 있습니다."}), 409
+
         device_nickname = mapping.device_nickname or device_uuid[:8]
         role_name = "멤버" if role=="member" else "게스트"
 
-        # 중복 문제 있음
         new_invite_code = secrets.token_urlsafe(64)
 
         new_invite_codes = InviteCode (
@@ -205,12 +224,26 @@ def get_member_list():
 
         if not any(m.user_uuid == user_uuid for m in mapping):
             return jsonify({"status": "error", "message": "forbidden"}), 403
-        
+
+        # 마스터에게만 게스트별 유효 토큰 보유 여부를 내려준다(목록에서 "토큰 없음" 표시용).
+        is_master = any(m.user_uuid == user_uuid and m.role == "master" for m in mapping)
+        with_token = set()
+        if is_master:
+            now = datetime.now(timezone.utc)
+            with_token = {
+                r[0] for r in session.query(UserToken.user_uuid).filter(
+                    UserToken.device_uuid == device_uuid,
+                    UserToken.is_revoked == False,
+                    UserToken.expired_at > now,
+                ).all()
+            }
+
         response = [{
             "user_uuid": i.user_uuid,
             "role": i.role,
             "display_name": i.display_name,
             "created_at": i.created_at.isoformat() + "Z" if i.created_at else None,
+            **({"has_token": i.user_uuid in with_token} if is_master and i.role == "guest" else {}),
         } for i in mapping]
 
         return jsonify({"status": "success", "data": response}), 200
