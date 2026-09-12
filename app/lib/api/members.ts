@@ -3,6 +3,19 @@ import { BACKEND_URL, USER_ACCESS_TOKEN_KEY } from "../constants";
 import { getTokenSecure } from "../token-storage";
 import { getApiErrorMessage } from "./errors";
 
+export const INVITE_LINK_PATH = "/invite";
+
+// 초대 링크는 BACKEND_URL과 같은 호스트를 쓴다(App Links 검증 도메인과 일치해야 함).
+export const buildInviteUrl = (invite_code: string) =>
+  `${BACKEND_URL}${INVITE_LINK_PATH}?code=${encodeURIComponent(invite_code)}`;
+
+// 링크를 붙여넣어도, 코드만 입력해도 받는다. 호스트는 검증하지 않는다
+// (유효성 판단은 서버가 하고, 호스트를 막아서 얻는 보안 이득이 없다).
+export const extractInviteCode = (raw: string) => {
+  const s = raw.trim();
+  return s.match(/[?&#]code=([A-Za-z0-9_-]+)/)?.[1] ?? s;
+};
+
 // POST /client/invite-code     body: { device_uuid, display_name }
 export const createInviteCode = async (
   device_uuid: String,

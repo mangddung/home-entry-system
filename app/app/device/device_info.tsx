@@ -7,6 +7,7 @@ import { fetchDeviceLogs, type DeviceLog } from "@/lib/api/logs";
 import { userTokenExchange } from "@/lib/ble";
 import {
   createGuestToken,
+  buildInviteUrl,
   createInviteCode,
   deleteGuestToken,
   deleteInviteCode,
@@ -1483,13 +1484,13 @@ export default function DeviceInfoView() {
                   </Text>
                   <View style={styles.resultCodeRow}>
                     <Text selectable style={[styles.resultCode, { color: colors.text }]}>
-                      {inviteResult.invite_code}
+                      {buildInviteUrl(inviteResult.invite_code)}
                     </Text>
                     <TouchableOpacity
                       style={[styles.copyBtn, { backgroundColor: colors.tint }]}
                       onPress={() => {
-                        Clipboard.setString(inviteResult.invite_code);
-                        showAlert("복사됨", "초대 코드가 복사되었습니다.");
+                        Clipboard.setString(buildInviteUrl(inviteResult.invite_code));
+                        showAlert("복사됨", "초대 링크가 복사되었습니다.");
                       }}
                     >
                       <MaterialCommunityIcons name="content-copy" size={14} color="#fff" />
@@ -1712,12 +1713,12 @@ export default function DeviceInfoView() {
                           style={[styles.codeValue, { color: colors.tabIconDefault }]}
                           numberOfLines={1}
                         >
-                          {item.invite_code}
+                          {buildInviteUrl(item.invite_code)}
                         </Text>
                         <TouchableOpacity
                           onPress={() => {
-                            Clipboard.setString(item.invite_code);
-                            showAlert("복사됨", "초대 코드가 복사되었습니다.");
+                            Clipboard.setString(buildInviteUrl(item.invite_code));
+                            showAlert("복사됨", "초대 링크가 복사되었습니다.");
                           }}
                         >
                           <MaterialCommunityIcons

@@ -3,10 +3,11 @@ import { CustomAlert } from "@/components/custom-alert";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { fetchInvitePreview, fetchRegisterInviteCode, type InvitePreview } from "@/lib/api/auth";
 import { loadDevices, updateDeviceName } from "@/lib/api/devices";
+import { extractInviteCode } from "@/lib/api/members";
 import { MAX_DEVICES_PER_USER } from "@/lib/constants";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { router } from "expo-router";
-import { useState } from "react";
+import { router, useLocalSearchParams } from "expo-router";
+import { useEffect, useState } from "react";
 import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -27,17 +28,19 @@ export default function RegisterInviteCodeScreen() {
   const showAlert = (title: string, message?: string, onClose?: () => void) =>
     setAlertConfig({ title, message, onClose });
 
-  const handleSubmit = async () => {
-    if (!inviteCode.trim()) {
+  const handleSubmit = async (raw?: string) => {
+    const code = extractInviteCode(raw ?? inviteCode);
+    if (!code) {
       showAlert("오류", "초대 코드를 입력해주세요.");
       return;
     }
+    setInviteCode(code);
     if ((await loadDevices()).length >= MAX_DEVICES_PER_USER) {
       showAlert("등록 제한", `기기는 최대 ${MAX_DEVICES_PER_USER}개까지 등록할 수 있습니다.`);
       return;
     }
     setLoading(true);
-    const result = await fetchInvitePreview(inviteCode.trim());
+    const result = await fetchInvitePreview(code);
     setLoading(false);
     if (result.type === "success") {
       setPreview(result.data as InvitePreview);
@@ -45,6 +48,12 @@ export default function RegisterInviteCodeScreen() {
       showAlert("오류", result.message);
     }
   };
+
+  const { code: linkedCode } = useLocalSearchParams<{ code?: string }>();
+  useEffect(() => {
+    if (linkedCode) handleSubmit(linkedCode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkedCode]);
 
   const handleAccept = async () => {
     setAccepting(true);
@@ -170,7 +179,7 @@ export default function RegisterInviteCodeScreen() {
           />
           <TouchableOpacity
             style={[styles.button, loading && styles.buttonDisabled]}
-            onPress={handleSubmit}
+            onPress={() => handleSubmit()}
             disabled={loading}
           >
             <Text style={styles.buttonText}>{loading ? "처리 중..." : "확인"}</Text>

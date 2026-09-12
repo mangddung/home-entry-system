@@ -18,6 +18,7 @@ from app.routes.client.logs import logs_bp
 from app.routes.admin.devices import admin_bp
 from app.routes.admin.members import admin_member_bp
 from app.routes.iot.init import iot_bp
+from app.routes.wellknown import wellknown_bp
 
 FIREBASE_CREDENTIAL_PATH = os.getenv("FIREBASE_CREDENTIAL_PATH")
 cred = credentials.Certificate(FIREBASE_CREDENTIAL_PATH)
@@ -39,6 +40,7 @@ def create_app():
     app.register_blueprint(fcm_bp)
     app.register_blueprint(logs_bp)
     app.register_blueprint(admin_member_bp)
+    app.register_blueprint(wellknown_bp)
 
     return app
 
