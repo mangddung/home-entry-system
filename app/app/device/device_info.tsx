@@ -16,7 +16,7 @@ import {
   fetchInviteCode,
   fetchMember,
 } from "@/lib/api/members";
-import { GEOFENCE_RADIUS_M, SELECTED_DEVICE_KEY, USER_UUID_KEY } from "@/lib/constants";
+import { DEVICES_REFRESHED_EVENT, GEOFENCE_RADIUS_M, SELECTED_DEVICE_KEY, USER_UUID_KEY } from "@/lib/constants";
 import type { ScheduleWindow } from "@/lib/schedule";
 import { getTokenSecure } from "@/lib/token-storage";
 import { MemberInfo, type IoTDevice } from "@/lib/types";
@@ -25,9 +25,10 @@ import { useIsFocused } from "@react-navigation/native";
 import Clipboard from "@react-native-clipboard/clipboard";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { router } from "expo-router";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  DeviceEventEmitter,
   Image,
   KeyboardAvoidingView,
   Modal,
@@ -586,31 +587,44 @@ export default function DeviceInfoView() {
     })();
   }, []);
 
-  // 상세 화면에 머무는 동안에도 서버 상태(온라인 여부·위치)를 주기적으로 반영한다.
+  // 상세 화면에 머무는 동안에도 서버 상태(온라인 여부·위치·내 토큰 사용 횟수)를 반영한다.
+  // 주기 갱신에 더해, 푸시로 캐시가 바뀌면(인증 성공·토큰 발급 등) 즉시 다시 그린다.
   useEffect(() => {
     if (!isFocused || !device) return;
     const device_uuid = device.device_uuid;
+    const role = device.role;
     const sync = async () => {
       await fetchDevices();
       const latest = (await loadDevices()).find((d) => d.device_uuid === device_uuid);
       if (!latest) return;
       setDevice((prev) => (JSON.stringify(prev) === JSON.stringify(latest) ? prev : latest));
+      // device 객체가 그대로면 아래 토큰 조회 effect가 다시 돌지 않으므로 여기서 같이 갱신한다
+      if (myUuid && role !== "master") {
+        const result = await fetchGuestTokens(device_uuid, myUuid);
+        if (result.type === "success") setMyTokens(result.data as typeof myTokens);
+      }
     };
     const interval = setInterval(() => { void sync(); }, 30_000);
-    return () => clearInterval(interval);
-  }, [isFocused, device?.device_uuid]);
+    const subscription = DeviceEventEmitter.addListener(DEVICES_REFRESHED_EVENT, () => { void sync(); });
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
+    };
+  }, [isFocused, device?.device_uuid, device?.role, myUuid]);
+
+  const refreshMembers = useCallback(async () => {
+    if (!device) return;
+    const result = await fetchMember(device.device_uuid);
+    if (result.type !== "success") {
+      setError(result.message ?? "오류 발생");
+    } else {
+      setDeviceMember(result.data as MemberInfo[]);
+    }
+  }, [device]);
 
   useEffect(() => {
-    void (async () => {
-      if (!device) return;
-      const result = await fetchMember(device.device_uuid);
-      if (result.type !== "success") {
-        setError(result.message ?? "오류 발생");
-      } else {
-        setDeviceMember(result.data as MemberInfo[]);
-      }
-    })();
-  }, [device]);
+    void refreshMembers();
+  }, [refreshMembers]);
 
   const injectLocation = (loc: IoTDevice["location"]) => {
     if (!mapReadyRef.current || !loc) return;

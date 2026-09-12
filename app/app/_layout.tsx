@@ -4,6 +4,7 @@ import { fetchDevices } from "@/lib/api/devices";
 import { setupAxiosInterceptors } from "@/lib/api/interceptors";
 import { updateGeoFence } from "@/lib/background-tracking";
 import { appendFcmNotification } from "@/lib/fcm-log";
+import { DEVICES_REFRESHED_EVENT } from "@/lib/constants";
 import { registerSessionAlert } from "@/lib/session-alert";
 import "@/tasks/bg-location";
 import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native";
@@ -16,6 +17,7 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState } from "react";
 import "react-native-get-random-values";
 import "react-native-reanimated";
+import { DeviceEventEmitter } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 setupAxiosInterceptors();
@@ -27,6 +29,8 @@ const refreshDevicesFromPush = async (data?: { [key: string]: unknown }) => {
   try {
     await fetchDevices();
     await updateGeoFence();
+    // 열려 있는 상세 화면이 30초 주기를 기다리지 않고 바로 다시 그리도록 알린다
+    DeviceEventEmitter.emit(DEVICES_REFRESHED_EVENT);
   } catch {
     // 다음 앱 실행 시 홈 화면에서 다시 동기화된다
   }

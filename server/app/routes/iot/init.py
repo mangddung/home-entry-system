@@ -196,9 +196,12 @@ def iot_validate_token():
             role_label      = "게스트" if user_role == "guest" else "멤버"
 
             session.commit()
-            log_activity("token_validated", user_uuid=user.user_uuid, device_uuid=device_uuid)
+            # 탈퇴·추방으로 매핑이 사라지면 이름을 찾을 곳이 없어지므로 로그에 함께 남긴다
+            log_activity("token_validated", user_uuid=user.user_uuid, device_uuid=device_uuid,
+                         detail={"display_name": user_display})
 
-            send_to_user(user_uuid, f"{user_nickname} 기기 알림", "인증 성공")
+            # 사용 횟수가 늘었으므로 인증한 본인 앱의 토큰 캐시를 갱신시킨다
+            send_to_user(user_uuid, f"{user_nickname} 기기 알림", "인증 성공", data={"type": "refresh_devices"})
             if not is_master and master_uuid:
                 send_to_user(master_uuid, f"{master_nickname} 기기 알림", f"{user_display} {role_label}가 인증 성공")
 

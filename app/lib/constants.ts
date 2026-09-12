@@ -30,3 +30,6 @@ export const MAX_DEVICES_PER_USER = 20;
 // Android Geofencing API는 반경 100m 미만을 신뢰성 있게 판정하지 못해 진입 자체가 누락된다.
 // 그래서 반경은 사용자가 고르지 않고 이 값으로 고정하고, 실제 근접 판정은 BLE 스캔이 담당한다.
 export const GEOFENCE_RADIUS_M = 150;
+
+// 푸시로 기기 캐시를 갱신한 뒤 열려 있는 화면에 알리는 이벤트 이름
+export const DEVICES_REFRESHED_EVENT = "devices-refreshed";
