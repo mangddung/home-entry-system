@@ -4,7 +4,7 @@ import { clearDeviceStorage } from "@/lib/api/devices";
 import { revokeFcmToken } from "@/lib/api/fcm";
 import { stopBackgroundTracking } from "@/lib/background-tracking";
 import { CURRENT_LOCATION_KEY, DEVICE_STATUS_KEY, IS_ONLINE_KEY, SELECTED_DEVICE_KEY, UNFIGURED_DEVICES_KEY, USER_ACCESS_TOKEN_KEY, USER_NAME_KEY, USER_REFRESH_TOKEN_KEY, USER_SECRET_KEY, USER_UUID_KEY } from "@/lib/constants";
-import { setTokenSecure } from "@/lib/token-storage";
+import { getTokenSecure, setTokenSecure } from "@/lib/token-storage";
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { AlertButton, CustomAlert } from "@/components/custom-alert";
@@ -82,19 +82,23 @@ export default function SettingsScreen() {
         style: "destructive",
         onPress: async () => {
           setAlertConfig(null);
-          await revokeFcmToken();
-          await setTokenSecure(USER_SECRET_KEY, "");
-          await setTokenSecure(USER_NAME_KEY, "");
-          await setTokenSecure(USER_UUID_KEY, "");
-          await setTokenSecure(USER_ACCESS_TOKEN_KEY, "");
-          await setTokenSecure(USER_REFRESH_TOKEN_KEY, "");
-          await clearDeviceStorage();
-          await setTokenSecure(UNFIGURED_DEVICES_KEY, "");
-          await setTokenSecure(SELECTED_DEVICE_KEY, "");
-          await setTokenSecure(IS_ONLINE_KEY, "");
-          await setTokenSecure(CURRENT_LOCATION_KEY, "");
-          await setTokenSecure(DEVICE_STATUS_KEY, "");
-          await stopBackgroundTracking();
+          // FCM 해지는 네트워크(파이어베이스+서버)라 느리다. 토큰만 먼저 읽어 넘기고 기다리지 않는다.
+          const accessToken = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
+          void revokeFcmToken(accessToken ?? undefined);
+          await Promise.all([
+            setTokenSecure(USER_SECRET_KEY, ""),
+            setTokenSecure(USER_NAME_KEY, ""),
+            setTokenSecure(USER_UUID_KEY, ""),
+            setTokenSecure(USER_ACCESS_TOKEN_KEY, ""),
+            setTokenSecure(USER_REFRESH_TOKEN_KEY, ""),
+            clearDeviceStorage(),
+            setTokenSecure(UNFIGURED_DEVICES_KEY, ""),
+            setTokenSecure(SELECTED_DEVICE_KEY, ""),
+            setTokenSecure(IS_ONLINE_KEY, ""),
+            setTokenSecure(CURRENT_LOCATION_KEY, ""),
+            setTokenSecure(DEVICE_STATUS_KEY, ""),
+            stopBackgroundTracking(),
+          ]);
           router.push("/login-oauth");
         },
       },

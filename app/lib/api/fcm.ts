@@ -40,8 +40,9 @@ export const fetchFcmToken = async () => {
   }
 };
 
-export const revokeFcmToken = async () => {
-  const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
+// 로그아웃에서는 토큰을 미리 읽어 넘긴다(스토리지를 지우는 것과 동시에 돌기 때문).
+export const revokeFcmToken = async (token?: string) => {
+  const access_token = token ?? (await getTokenSecure(USER_ACCESS_TOKEN_KEY));
   try {
     const m = getMessaging(getApp());
     await deleteToken(m);
