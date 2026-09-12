@@ -37,6 +37,7 @@
 #define MANUFACTURER_UUID_DEFAULT ""
 
 // ── API Server ───────────────────────────────────────────────────────────────
+//#define API_BASE_URL          "http://192.168.0.10:15895"
 #define API_BASE_URL          "https://your-server.example.com"
 #define HA_INIT_URL           API_BASE_URL "/iot/init"
 #define HA_VALIDATE_URL       API_BASE_URL "/iot/validate_token"

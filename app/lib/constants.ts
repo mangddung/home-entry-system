@@ -10,6 +10,7 @@ export const DEVICE_SETUP_KEY = "device-setup";
 export const DEBUG_LOG = "debug-log";
 export const IS_ONLINE_KEY = "is-online";
 export const BACKEND_URL = "https://your-server.example.com";
+//export const BACKEND_URL = "http://192.168.0.10:15895";
 
 export const BG_LOCATION_TASK = "BG-Tracking";
 export const BG_GEOFENCE_TASK = "BG-Geofence";
