@@ -29,6 +29,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 const TIMER_SECONDS = 180;
 const SCAN_SECONDS = 30;
+const WIFI_LIST_PREVIEW_COUNT = 5;
 
 function getSignalInfo(rssi: number | null): { name: string; color: string } {
   if (rssi == null) return { name: "signal-cellular-outline", color: "#9E9E9E" };
@@ -106,6 +107,7 @@ export default function DeviceSetupScreen() {
   const [wifiPassword, setWifiPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [wifiList, setWifiList] = useState<WifiNetwork[]>([]);
+  const [showAllWifi, setShowAllWifi] = useState(false);
   const [isScanningWifi, setIsScanningWifi] = useState(false);
   const [wifiScanError, setWifiScanError] = useState<string | null>(null);
 
@@ -222,6 +224,7 @@ export default function DeviceSetupScreen() {
     setIsScanningWifi(true);
     const result = await scanWifi24GHz();
     setIsScanningWifi(false);
+    setShowAllWifi(false);
     if (result.ok) {
       setWifiList(result.networks);
       setWifiScanError(null);
@@ -382,8 +385,14 @@ export default function DeviceSetupScreen() {
                 const device_uuid = await receiveData(connected!, setupDevice!);
                 setDeviceUuid(device_uuid!);
                 const setup_token = await fetchDeviceSetupToken(device_uuid);
-                setSetupToken(setup_token);
                 setIsSubmitting(false);
+                if (typeof setup_token !== "string" || !setup_token) {
+                  Alert.alert("설정 실패", "설정 토큰을 받지 못했습니다. 다시 시도해 주세요.", [
+                    { text: "확인" },
+                  ]);
+                  return;
+                }
+                setSetupToken(setup_token);
                 setProcces(3);
               }}
             >
@@ -490,7 +499,7 @@ export default function DeviceSetupScreen() {
                       { backgroundColor: cardBg, borderColor: cardBorder },
                     ]}
                   >
-                    {wifiList.map((net) => {
+                    {(showAllWifi ? wifiList : wifiList.slice(0, WIFI_LIST_PREVIEW_COUNT)).map((net) => {
                       const selected = net.ssid === wifiSsid;
                       return (
                         <TouchableOpacity
@@ -518,6 +527,26 @@ export default function DeviceSetupScreen() {
                         </TouchableOpacity>
                       );
                     })}
+                    {wifiList.length > WIFI_LIST_PREVIEW_COUNT && (
+                      <TouchableOpacity
+                        style={[styles.wifiItem, { borderBottomColor: cardBorder }]}
+                        onPress={() => setShowAllWifi((v) => !v)}
+                      >
+                        <MaterialCommunityIcons
+                          name={showAllWifi ? "chevron-up" : "chevron-down"}
+                          size={20}
+                          color={colors.tabIconDefault}
+                        />
+                        <Text
+                          style={[styles.wifiItemText, { color: colors.tabIconDefault }]}
+                          numberOfLines={1}
+                        >
+                          {showAllWifi
+                            ? "접기"
+                            : `더 보기 (${wifiList.length - WIFI_LIST_PREVIEW_COUNT}개)`}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 )}
 
@@ -574,7 +603,20 @@ export default function DeviceSetupScreen() {
               disabled={isSubmitting}
               onPress={async () => {
                 setIsSubmitting(true);
-                await sendWifiSetup(connected, setupDevice!, wifiSsid, wifiPassword, setupToken);
+                const sent = await sendWifiSetup(
+                  connected,
+                  setupDevice!,
+                  wifiSsid,
+                  wifiPassword,
+                  setupToken,
+                );
+                if (!sent) {
+                  setIsSubmitting(false);
+                  Alert.alert("설정 실패", "기기로 설정 정보를 보내지 못했습니다.", [
+                    { text: "확인" },
+                  ]);
+                  return;
+                }
                 const receiveResponse = await receiveData(connected!, setupDevice!);
                 if (receiveResponse != "ACK") {
                   console.log("not received");

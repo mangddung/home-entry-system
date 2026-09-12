@@ -304,7 +304,22 @@ export const sendWifiSetup = async (
 ) => {
   const bleUuids = ioTDevice.ble_uuids;
   const user_uuid = await getTokenSecure(USER_UUID_KEY);
-  if (!user_uuid) return;
+  if (!user_uuid) return false;
+  // 펌웨어는 네 필드 모두 문자열이어야 파싱한다. 하나라도 문자열이 아니면
+  // JSON 자체는 유효해서 cJSON_Parse를 통과한 뒤 "missing JSON fields"로 죽는다.
+  if (
+    typeof setup_token !== "string" ||
+    typeof wifi_ssid !== "string" ||
+    typeof wifi_pw !== "string" ||
+    !setup_token
+  ) {
+    logDebug({
+      event_name: event_name,
+      log_type: "WARNING",
+      message: `잘못된 setup payload: setup_token=${typeof setup_token}, wifi_ssid=${typeof wifi_ssid}, wifi_pw=${typeof wifi_pw}`,
+    });
+    return false;
+  }
   const payload = {
     setup_token: setup_token,
     wifi_ssid: wifi_ssid,
@@ -324,12 +339,14 @@ export const sendWifiSetup = async (
       bleUuids.ble_write_uuid as string,
       encodedData,
     );
+    return true;
   } catch (e) {
     logDebug({
       event_name: event_name,
       log_type: "WARNING",
       message: `WIfi 셋업 전송 실패: ${e}`,
     });
+    return false;
   }
 };
 
