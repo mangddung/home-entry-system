@@ -109,7 +109,7 @@ const mapHTML = `
   </div>
 
   <script>
-    var map = L.map('map', { zoomControl: false }).setView([37.5665, 126.9780], 15);
+    var map = L.map('map', { zoomControl: false, zoomAnimation: false }).setView([37.5665, 126.9780], 15);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '\\u00a9 OpenStreetMap contributors',
       maxZoom: 19
