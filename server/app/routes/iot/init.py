@@ -61,6 +61,16 @@ def _decode_device_token(token: str) -> dict | None:
     return payload
 
 
+def _notify_auth_denied(session, user_uuid, device_uuid, reason):
+    """인증 거부 사유를 본인에게만 알리고 기록한다(마스터에게는 푸시하지 않고 로그로 남긴다)."""
+    mapping  = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid, device_uuid=device_uuid).first()
+    nickname = (mapping.device_nickname if mapping and mapping.device_nickname else device_uuid[:8])
+    display  = mapping.display_name if mapping else user_uuid
+    log_activity("token_denied", user_uuid=user_uuid, device_uuid=device_uuid,
+                 detail={"display_name": display, "reason": reason})
+    send_to_user(user_uuid, f"{nickname} 기기 알림", f"인증 실패 — {reason}")
+
+
 # POST /iot/init
 @iot_bp.route("/init", methods=["POST"])
 def iot_init():
@@ -149,9 +159,11 @@ def iot_validate_token():
     received_token = inner.get("auth_token", "")
     now = datetime.now(timezone.utc)
 
-    if not received_token: return jsonify({"status": "error", "message": "no token"}), 400
-
     with _db.Session() as session:
+        if not received_token:
+            _notify_auth_denied(session, user.user_uuid, device_uuid, "발급받은 토큰이 없습니다")
+            return jsonify({"status": "error", "message": "no token"}), 400
+
         token = session.query(UserToken).filter(
             UserToken.token_value==received_token, 
             UserToken.user_uuid==user.user_uuid, 
@@ -170,10 +182,12 @@ def iot_validate_token():
                     local_now = now.astimezone(ZoneInfo(token.schedule_tz))
                 except (ValueError, TypeError, ZoneInfoNotFoundError):
                     log_activity("token_schedule_error", user_uuid=user.user_uuid, device_uuid=device_uuid)
+                    _notify_auth_denied(session, user.user_uuid, device_uuid, "토큰 설정에 문제가 있습니다")
                     return jsonify({"status": "error", "message": "Token invalid"}), 400
 
                 window, start_date = match_window(schedule, local_now)
                 if window is None:
+                    _notify_auth_denied(session, user.user_uuid, device_uuid, "사용 가능한 시간이 아닙니다")
                     return jsonify({"status": "error", "message": "Token invalid"}), 400
 
                 key   = period_key(window, start_date)
@@ -182,6 +196,7 @@ def iot_validate_token():
                     usage = TokenUsage(token_id=token.id, period_key=key, uses=0)
                     session.add(usage)
                 if usage.uses >= window["max_uses"]:
+                    _notify_auth_denied(session, user.user_uuid, device_uuid, "이 시간대에 허용된 횟수를 모두 사용했습니다")
                     return jsonify({"status": "error", "message": "Token invalid"}), 400
                 usage.uses += 1
 
@@ -211,6 +226,7 @@ def iot_validate_token():
 
             return jsonify({"status": "success", "message": "Token validated"}), 200
         else:
+            _notify_auth_denied(session, user.user_uuid, device_uuid, "사용할 수 없는 토큰입니다")
             return jsonify({"status": "error", "message": "Token invalid"}), 400
 
 # POST /iot/ping

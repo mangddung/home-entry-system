@@ -8,9 +8,10 @@ from app.routes.client.auth import verify_access_token
 
 logs_bp = Blueprint("logs", __name__, url_prefix="/client")
 
+ACCESS_ACTIONS = ["token_validated", "token_denied"]
+
 CATEGORY_PATTERNS = {
     "device": "device_%",
-    "access": "token_validated",
     "member": "member_%",
 }
 
@@ -58,15 +59,13 @@ def get_logs():
         # 마스터가 아니면 카테고리와 무관하게 본인 출입 기록만 본다(프런트 탭이 아니라 여기서 막는다)
         if mapping.role != "master":
             query = query.filter(
-                ActivityLog.action == CATEGORY_PATTERNS["access"],
+                ActivityLog.action.in_(ACCESS_ACTIONS),
                 ActivityLog.user_uuid == user_uuid,
             )
+        elif category == "access":
+            query = query.filter(ActivityLog.action.in_(ACCESS_ACTIONS))
         elif category in CATEGORY_PATTERNS:
-            pattern = CATEGORY_PATTERNS[category]
-            if "%" in pattern:
-                query = query.filter(ActivityLog.action.like(pattern))
-            else:
-                query = query.filter(ActivityLog.action == pattern)
+            query = query.filter(ActivityLog.action.like(CATEGORY_PATTERNS[category]))
 
         logs = query.order_by(ActivityLog.created_at.desc()).all()
 

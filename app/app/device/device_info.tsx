@@ -96,6 +96,7 @@ function getActionLabel(action: string): string {
     device_updated: "기기 정보 수정",
     device_deleted: "기기 삭제",
     token_validated: "출입 인증",
+    token_denied: "출입 인증 실패",
     member_added: "멤버 추가",
     member_removed: "멤버 제거",
     member_role_updated: "역할 변경",
@@ -120,7 +121,7 @@ function formatLogDetail(detail: string | null): string | null {
     const roleLabel =
       parsed.role === "master" ? "마스터" : parsed.role === "guest" ? "게스트" : parsed.role === "member" ? "멤버" : null;
     const target = [parsed.display_name, roleLabel && `(${roleLabel})`].filter(Boolean).join(" ");
-    return target || null;
+    return [target, parsed.reason].filter(Boolean).join(" · ") || null;
   } catch {
     return detail;
   }
