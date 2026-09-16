@@ -54,6 +54,9 @@ def _decode_device_token(token: str) -> dict | None:
         device = session.query(DeviceManagement).filter_by(device_uuid=payload.get("sub")).first()
         if not device or device.current_jti != jti:
             return None
+        # 기기 토큰으로 들어온 모든 요청을 생존 신호로 본다(/iot/ping 5분 주기보다 먼저 온라인 반영)
+        device.last_ping_at = datetime.now(timezone.utc)
+        session.commit()
 
     return payload
 
@@ -85,17 +88,17 @@ def iot_init():
         master_mapping = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first()
         master_nickname = master_mapping.device_nickname or device_uuid[:8] if master_mapping else device_uuid
 
-    if device is None:
-        return jsonify({"status": "failed", "message": "device not found"}), 404
+        if device is None:
+            return jsonify({"status": "failed", "message": "device not found"}), 404
 
-    if (device.ble_service_uuid      != ble_service_uuid  or
-        device.ble_read_uuid         != ble_read_uuid     or
-        device.ble_write_uuid        != ble_write_uuid    or
-        device.ble_manufacturer_uuid != manufacturer_uuid):
-        return jsonify({"status": "failed", "message": "uuid mismatch"}), 403
+        if (device.ble_service_uuid      != ble_service_uuid  or
+            device.ble_read_uuid         != ble_read_uuid     or
+            device.ble_write_uuid        != ble_write_uuid    or
+            device.ble_manufacturer_uuid != manufacturer_uuid):
+            return jsonify({"status": "failed", "message": "uuid mismatch"}), 403
 
     log_activity("device_init", device_uuid=device_uuid)
-    send_to_device_master(device_uuid, f"{master_nickname} 기기 알림", "기기 전원이 켜졌습니다")
+    send_to_device_master(device_uuid, f"{master_nickname} 기기 알림", "기기 전원이 켜졌습니다", data={"type": "refresh_devices"})
     return jsonify({"status": "ok"}), 200
 
 
@@ -145,6 +148,7 @@ def iot_validate_token():
     # 토큰 검증
     received_token = inner.get("auth_token", "")
     now = datetime.now(timezone.utc)
+
     if not received_token: return jsonify({"status": "error", "message": "no token"}), 400
 
     with _db.Session() as session:
@@ -222,17 +226,8 @@ def iot_ping():
     if not payload or payload.get("type") != "device":
         return jsonify({"status": "failed", "message": "invalid token"}), 401
     
+    # last_ping_at은 _decode_device_token에서 갱신된다(기기 요청 전체 공통)
     device_uuid = payload.get("sub")
-
-    with _db.Session() as session:
-        try:
-            device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()
-            if not device:
-                return jsonify({"status": "failed", "message": "device not found"}), 404
-            device.last_ping_at = datetime.now(timezone.utc)
-            session.commit()
-        except Exception:
-            return jsonify({"status": "failed", "message": "server error"}), 500
 
     log_activity("device_ping", device_uuid=device_uuid)
     return jsonify({"status": "success", "message": "pong"}), 200
@@ -322,7 +317,7 @@ def iot_validate_setup():
             "refresh_token": new_refresh,
         }
         log_activity("device_setup", user_uuid=user_uuid, device_uuid=device_uuid)
-        send_to_user(user_uuid, f"{device_uuid[:8]} 기기 알림", "기기가 등록되었습니다")
+        send_to_user(user_uuid, f"{device_uuid[:8]} 기기 알림", "기기가 등록되었습니다", data={"type": "refresh_devices"})
         return jsonify({
             "status": "success",
             "data": new_data
@@ -384,9 +379,9 @@ def iot_reset():
 
         log_activity("device_reset", device_uuid=device_uuid)
         for member_uuid, nickname in member_info:
-            send_to_user(member_uuid, f"{nickname} 기기 알림", "기기 초기화로 그룹에서 추방되었습니다")
+            send_to_user(member_uuid, f"{nickname} 기기 알림", "기기 초기화로 그룹에서 추방되었습니다", data={"type": "refresh_devices"})
         if master_uuid:
-            send_to_user(master_uuid, f"{master_nickname} 기기 알림", "기기가 리셋되었습니다")
+            send_to_user(master_uuid, f"{master_nickname} 기기 알림", "기기가 리셋되었습니다", data={"type": "refresh_devices"})
         return jsonify({
             "status": "success",
             "message": "reset success",
@@ -438,6 +433,8 @@ def iot_refresh():
         if device is None:
             return jsonify({"status": "error", "message": "device not found"}), 404
 
+        device.last_ping_at = now
+
         if old_jti and old_exp:
             session.merge(TokenBlacklist(jti=old_jti, expired_at=old_exp))
 
@@ -479,6 +476,7 @@ def iot_reauth():
         if not hmac.compare_digest(db_secret_key.encode(), secret_key.encode()):
             return jsonify({"status": "failed", "message": "invalid key"}), 401
 
+        device.last_ping_at = datetime.now(timezone.utc)
         session.query(DeviceRefreshToken).filter_by(device_uuid=device_uuid).delete()
 
         new_access, new_refresh = issue_device_token_pair(

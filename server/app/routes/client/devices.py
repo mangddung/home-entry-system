@@ -233,7 +233,7 @@ def get_device_location():
             session.commit()
 
             log_activity("device_location_added", user_uuid=user_uuid, device_uuid=device_uuid)
-            send_to_user(user_uuid, f"{device_uuid[:8]} 기기 알림", "기기 위치가 등록되었습니다")
+            send_to_user(user_uuid, f"{device_uuid[:8]} 기기 알림", "기기 위치가 등록되었습니다", data={"type": "refresh_devices"})
         else:
             device_location.latitude = latitude
             device_location.longitude = longitude
@@ -339,9 +339,9 @@ def delete_device_membership():
 
         log_activity("member_leaved", user_uuid=user_uuid, device_uuid=device_uuid,
                      detail={"display_name": user_display_name, "role": user_role})
-        send_to_user(user_uuid, f"{user_nickname} 기기 알림", f"그룹을 떠났습니다")      
+        send_to_user(user_uuid, f"{user_nickname} 기기 알림", f"그룹을 떠났습니다", data={"type": "refresh_devices"})
         if master_uuid:
-            send_to_user(master_uuid, f"{master_nickname} 기기 알림", f"{user_display_name}가 그룹을 떠났습니다")  
+            send_to_user(master_uuid, f"{master_nickname} 기기 알림", f"{user_display_name}가 그룹을 떠났습니다", data={"type": "refresh_devices"})
         return jsonify({"status": "success", "message": "success"}), 200
 
 

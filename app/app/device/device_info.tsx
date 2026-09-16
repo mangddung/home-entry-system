@@ -616,6 +616,16 @@ export default function DeviceInfoView() {
     })();
   }, []);
 
+  const refreshMembers = useCallback(async () => {
+    if (!device) return;
+    const result = await fetchMember(device.device_uuid);
+    if (result.type !== "success") {
+      setError(result.message ?? "오류 발생");
+    } else {
+      setDeviceMember(result.data as MemberInfo[]);
+    }
+  }, [device]);
+
   // 상세 화면에 머무는 동안에도 서버 상태(온라인 여부·위치·내 토큰 사용 횟수)를 반영한다.
   // 주기 갱신에 더해, 푸시로 캐시가 바뀌면(인증 성공·토큰 발급 등) 즉시 다시 그린다.
   useEffect(() => {
@@ -632,6 +642,8 @@ export default function DeviceInfoView() {
         const result = await fetchGuestTokens(device_uuid, myUuid);
         if (result.type === "success") setMyTokens(result.data as typeof myTokens);
       }
+      // 멤버 가입·탈퇴·추방 푸시는 device 객체를 바꾸지 않으므로 멤버 목록은 따로 갱신한다
+      await refreshMembers();
     };
     const interval = setInterval(() => { void sync(); }, 30_000);
     const subscription = DeviceEventEmitter.addListener(DEVICES_REFRESHED_EVENT, () => { void sync(); });
@@ -639,17 +651,7 @@ export default function DeviceInfoView() {
       clearInterval(interval);
       subscription.remove();
     };
-  }, [isFocused, device?.device_uuid, device?.role, myUuid]);
-
-  const refreshMembers = useCallback(async () => {
-    if (!device) return;
-    const result = await fetchMember(device.device_uuid);
-    if (result.type !== "success") {
-      setError(result.message ?? "오류 발생");
-    } else {
-      setDeviceMember(result.data as MemberInfo[]);
-    }
-  }, [device]);
+  }, [isFocused, device?.device_uuid, device?.role, myUuid, refreshMembers]);
 
   useEffect(() => {
     void refreshMembers();

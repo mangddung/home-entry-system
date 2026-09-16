@@ -24,14 +24,14 @@ def send_to_user(user_uuid: str, title: str, body: str, data: dict | None = None
         logger.warning(f"FCM send failed for user {user_uuid}: {e}")
 
 
-def send_to_device_master(device_uuid: str, title: str, body: str):
+def send_to_device_master(device_uuid: str, title: str, body: str, data: dict | None = None):
     with _db.Session() as session:
         master = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first()
         if not master:
             return
         master_uuid = master.user_uuid
 
-    send_to_user(master_uuid, title, body)
+    send_to_user(master_uuid, title, body, data)
 
 
 def send_to_device_role(device_uuid: str, role: str | list[str], title: str, body: str, data: dict | None = None):

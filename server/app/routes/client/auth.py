@@ -278,9 +278,9 @@ def join_device():
         session.commit()
 
         log_activity("member_joined", user_uuid=user_uuid, device_uuid=device_uuid)
-        send_to_user(user_uuid, f"{device_uuid[:8]} 기기 알림", f"{role_label} 권한으로 등록되었습니다")
+        send_to_user(user_uuid, f"{device_uuid[:8]} 기기 알림", f"{role_label} 권한으로 등록되었습니다", data={"type": "refresh_devices"})
         if master_uuid:
-            send_to_user(master_uuid, f"{master_nickname} 기기 알림", f"{display_name} 유저 초대 코드 수락")
+            send_to_user(master_uuid, f"{master_nickname} 기기 알림", f"{display_name} 유저 초대 코드 수락", data={"type": "refresh_devices"})
 
         return jsonify({"status": "success", "message": "success", "data": {"device_uuid": device_uuid}}), 200
 
