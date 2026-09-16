@@ -425,7 +425,7 @@ export default function DeviceInfoView() {
     try {
       const success = await userTokenExchange(device);
       if (success) {
-        showAlert("수동 인증", "인증 요청이 완료되었습니다.");
+        showAlert("수동 인증", "인증 요청을 보냈습니다.");
       } else {
         showAlert("오류", "기기에 연결할 수 없습니다. 기기가 오프라인 상태이거나 범위 밖에 있는지 확인하세요.");
       }

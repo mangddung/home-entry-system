@@ -170,11 +170,16 @@ const mapHTML = `
       }));
     }
 
+    var pinTouchedByUser = false;
+
     map.on('click', function(e) {
+      pinTouchedByUser = true;
       placePin(e.latlng);
     });
 
-    function goToLocation(lat, lng) {
+    // refine=true면 사용자가 직접 핀을 찍은 뒤엔 무시(정확한 GPS 보정이 수동 선택을 덮어쓰지 않도록)
+    function goToLocation(lat, lng, refine) {
+      if (refine && pinTouchedByUser) return;
       var latlng = L.latLng(lat, lng);
       map.setView(latlng, 16);
       placePin(latlng);
@@ -277,18 +282,24 @@ export default function LocationSetupScreen() {
         Toast.info("위치 권한이 필요합니다");
         return;
       }
-      // GPS fix를 우선 기다리고(정확도 우선), 실내 등으로 15초 내 안 잡히면 마지막 위치로 대체
-      const loc =
-        (await Promise.race([
-          Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000)),
-        ])) ?? (await Location.getLastKnownPositionAsync());
-      if (!loc) {
-        Toast.info("현재 위치를 가져오지 못했습니다");
-        return;
+      // 캐시된 마지막 위치로 즉시 이동(지도 탭과 동일), 이후 GPS fix가 잡히면 보정
+      const last = await Location.getLastKnownPositionAsync();
+      if (last) {
+        webViewRef.current?.injectJavaScript(
+          `goToLocation(${last.coords.latitude}, ${last.coords.longitude}); true;`,
+        );
       }
-      const { latitude, longitude } = loc.coords;
-      webViewRef.current?.injectJavaScript(`goToLocation(${latitude}, ${longitude}); true;`);
+      const fix = (await Promise.race([
+        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000)),
+      ])) as Location.LocationObject | null;
+      if (fix) {
+        webViewRef.current?.injectJavaScript(
+          `goToLocation(${fix.coords.latitude}, ${fix.coords.longitude}, ${last ? "true" : "false"}); true;`,
+        );
+      } else if (!last) {
+        Toast.info("현재 위치를 가져오지 못했습니다");
+      }
     } catch {
       Toast.info("현재 위치를 가져오지 못했습니다");
     }
