@@ -1,3 +1,4 @@
+import hmac
 import os
 import uuid
 from functools import wraps
@@ -16,7 +17,7 @@ def _require_admin(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         key = request.headers.get("X-Admin-Key", "")
-        if not key or key != os.environ.get("ADMIN_SECRET", ""):
+        if not key or not hmac.compare_digest(key, os.environ.get("ADMIN_SECRET", "")):
             return jsonify({"error": "unauthorized"}), 401
         return f(*args, **kwargs)
     return decorated
