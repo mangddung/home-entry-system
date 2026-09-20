@@ -17,6 +17,8 @@ npx expo run:android
 
 $serverCmd = @'
 Set-Location 'C:\path\to\iot-app\server'
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+& 'C:\path\to\iot-app\server\.venv\Scripts\Activate.ps1'
 python main.py
 '@
 
