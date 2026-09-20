@@ -104,12 +104,16 @@ const mapHTML = `
       <div id="panel-title">이 위치로 등록</div>
       <button id="confirm-btn" onclick="onConfirm()">확인</button>
     </div>
-    <div id="panel-hint">핀을 다시 눌러 위치를 변경할 수 있습니다</div>
+    <div id="panel-hint">핀을 드래그하거나 지도를 눌러 위치를 변경할 수 있습니다</div>
     <div id="panel-hint">기기 주변 약 ${GEOFENCE_RADIUS_M}m 안에 들어오면 자동으로 기기를 찾기 시작합니다</div>
   </div>
 
   <script>
-    var map = L.map('map', { zoomControl: false, zoomAnimation: false }).setView([37.5665, 126.9780], 15);
+    var map = L.map('map', { zoomControl: false }).setView([37.5665, 126.9780], 15);
+    // WebView는 HTML 로드 후에도 네이티브 레이아웃이 바뀌며 컨테이너 크기가 변한다.
+    // Leaflet이 캐시한 크기가 어긋나면 탭 좌표·줌 중심이 전부 밀린다.
+    new ResizeObserver(function() { map.invalidateSize({ animate: false }); })
+      .observe(document.getElementById('map'));
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '\\u00a9 OpenStreetMap contributors',
       maxZoom: 19
@@ -191,7 +195,10 @@ const mapHTML = `
       });
     }
 
+    var existingDrawn = false;
     function addExistingDevices(devices) {
+      if (existingDrawn) return;
+      existingDrawn = true;
       devices.forEach(function(d) {
         if (!d.location) return;
         var label = esc(d.device_nickname || d.device_uuid.substring(0, 8) + '...');
@@ -238,7 +245,12 @@ export default function LocationSetupScreen() {
   const onConfirm = async (_lat: number, _lng: number, _nickname: string) => {
     if (!targetDevice) return;
     const result = await fetchDeviceLocation(targetDevice.device_uuid, _lat, _lng, _nickname);
-    if (result!.type === "success") Toast.info("위치 등록 성공");
+    if (result?.type === "success") {
+      Toast.info("위치 등록 성공");
+      router.replace("/home");
+    } else {
+      Toast.fail(result?.message ?? "위치 등록에 실패했습니다");
+    }
   };
 
   const submitLocation = async (_nickname: string) => {
@@ -309,6 +321,7 @@ export default function LocationSetupScreen() {
     void (async () => {
       const devices = await loadDevices();
       existingDevicesRef.current = devices.filter((d) => d.location);
+      injectExistingDevices();
     })();
   }, []);
 
