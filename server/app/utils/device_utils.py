@@ -15,6 +15,15 @@ REFRESH_TOKEN_TTL = timedelta(days=180)
 
 MAX_DEVICES_PER_USER = 20
 
+# /client/setup-token 요청자를 기기 설정이 끝날 때까지 점유하는 시간
+SETUP_CLAIM_TTL = timedelta(minutes=15)
+
+def setup_claim_expired(requested_at) -> bool:
+    """requested_at은 DB에서 읽은 naive UTC. 없으면 만료로 본다."""
+    if requested_at is None:
+        return True
+    return datetime.utcnow() - requested_at > SETUP_CLAIM_TTL
+
 def check_device_limit(session, user_uuid: str) -> bool:
     """유저가 등록/참여한 기기 총 개수(역할 무관)가 제한 미만인지 확인"""
     count = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid).count()

@@ -84,7 +84,9 @@ class DeviceManagement(Base):
     device_secret_key = Column(String(255), nullable=False, unique=True)
     device_token      = Column(String(255), nullable=False, unique=True)
     setup_token       = Column(String(255), nullable=True, unique=True)
-    ble_service_uuid      = Column(String(255), nullable=False, unique=True)
+    setup_user_uuid   = Column(String(50), nullable=True)   # /client/setup-token 요청자 = 설정 완료 시 master
+    setup_requested_at = Column(DateTime, nullable=True)
+    ble_service_uuid     = Column(String(255), nullable=False, unique=True)
     ble_write_uuid        = Column(String(255), nullable=False, unique=True)
     ble_read_uuid         = Column(String(255), nullable=False, unique=True)
     ble_manufacturer_uuid = Column(String(255), nullable=True, unique=True)

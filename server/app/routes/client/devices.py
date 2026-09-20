@@ -12,7 +12,9 @@ from firebase_admin import messaging
 from app.utils.database import database as _db
 from app.utils.database import UserDeviceMapping, DeviceManagement, UserToken
 from app.utils.database.models import DeviceLocation, Settings, User
+from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
+from app.utils.device_utils import SETUP_CLAIM_TTL
 from app.routes.client.auth import verify_access_token
 
 client_bp = Blueprint("client", __name__, url_prefix="/client")
@@ -153,11 +155,26 @@ def get_setup_token():
 
     with _db.Session() as session:
         device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()
-        if device:
-            log_activity("device_setup_token_served", user_uuid=user_uuid, device_uuid=device_uuid)
-            return jsonify({"status": "success", "data": {"setup_token": device.setup_token}}), 200
+        if not device:
+            return jsonify({"status": "error", "message": "invalid device"}), 400
 
-    return jsonify({"status": "error", "message": "invalid device"}), 400
+        # 요청자를 master 후보로 점유한다. 다른 사용자가 점유 중(미만료)이면 거부.
+        # 조건부 UPDATE 한 번으로 확인과 기록을 원자적으로 처리한다.
+        now = datetime.utcnow()
+        claimed = session.query(DeviceManagement).filter(
+            DeviceManagement.device_uuid == device_uuid,
+            or_(
+                DeviceManagement.setup_user_uuid.is_(None),
+                DeviceManagement.setup_user_uuid == user_uuid,
+                DeviceManagement.setup_requested_at < now - SETUP_CLAIM_TTL,
+            ),
+        ).update({"setup_user_uuid": user_uuid, "setup_requested_at": now}, synchronize_session=False)
+        if not claimed:
+            return jsonify({"status": "error", "message": "setup in progress by another user"}), 409
+        session.commit()
+
+        log_activity("device_setup_token_served", user_uuid=user_uuid, device_uuid=device_uuid)
+        return jsonify({"status": "success", "data": {"setup_token": device.setup_token}}), 200
 
 # GET /client/unfigured-devices
 @client_bp.route("/unfigured-devices", methods=["GET"])

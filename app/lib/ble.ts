@@ -1,5 +1,5 @@
 import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
-import { DEBUG_LOG, DEVICE_STATUS_KEY, USER_SECRET_KEY, USER_UUID_KEY } from "@/lib/constants";
+import { DEBUG_LOG, DEVICE_STATUS_KEY, USER_SECRET_KEY } from "@/lib/constants";
 import { encryptAES, sha256 } from "@/lib/crypto";
 import { appendSystemLog, formatTimestamp } from "@/lib/system-log";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -209,13 +209,12 @@ export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, no
   const bleUuids = ioTDevice.ble_uuids;
   // 앱 -> ESP 데이터 전송
   try {
-    const userUuid = await getTokenSecure(USER_UUID_KEY);
     const bleEncryptionKey = await getTokenSecure(USER_SECRET_KEY);
-    if (!userUuid || !bleEncryptionKey) {
+    if (!bleEncryptionKey) {
       logDebug({
         event_name: event_name,
         log_type: "WARNING",
-        message: "user uuid, secret key 없음",
+        message: "secret key 없음",
       });
       return false;
     }
@@ -226,7 +225,7 @@ export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, no
     };
 
     const encryptedData = encryptAES(JSON.stringify(payload), bleEncryptionKey);
-    const encodedData = Buffer.from(userUuid + ":" + encryptedData, "utf-8").toString("base64");
+    const encodedData = Buffer.from(encryptedData, "utf-8").toString("base64");
     await connected.writeCharacteristicWithoutResponseForService(
       bleUuids.ble_service_uuid as string,
       bleUuids.ble_write_uuid as string,
@@ -303,9 +302,7 @@ export const sendWifiSetup = async (
   setup_token: any,
 ) => {
   const bleUuids = ioTDevice.ble_uuids;
-  const user_uuid = await getTokenSecure(USER_UUID_KEY);
-  if (!user_uuid) return false;
-  // 펌웨어는 네 필드 모두 문자열이어야 파싱한다. 하나라도 문자열이 아니면
+  // 펌웨어는 세 필드 모두 문자열이어야 파싱한다. 하나라도 문자열이 아니면
   // JSON 자체는 유효해서 cJSON_Parse를 통과한 뒤 "missing JSON fields"로 죽는다.
   if (
     typeof setup_token !== "string" ||
@@ -324,7 +321,6 @@ export const sendWifiSetup = async (
     setup_token: setup_token,
     wifi_ssid: wifi_ssid,
     wifi_pw: wifi_pw,
-    user_uuid: user_uuid,
   };
   const encodedData = Buffer.from(JSON.stringify(payload), "utf-8").toString("base64");
   logDebug({

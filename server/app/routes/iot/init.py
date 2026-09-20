@@ -11,7 +11,7 @@ import jwt
 from app.utils.database import database as _db
 from app.utils.database.models import DeviceManagement, User, UserDeviceMapping, UserToken, DeviceRefreshToken, TokenBlacklist, TokenUsage
 from app.utils.crypto_utils import decrpyt_key, decrypt_data
-from app.utils.device_utils import _generate_device_secret, _issue_device_jwt, issue_device_token_pair, check_device_limit
+from app.utils.device_utils import _generate_device_secret, _issue_device_jwt, issue_device_token_pair, check_device_limit, setup_claim_expired
 from app.utils.log_utils import log_activity
 from app.utils.fcm_utils import send_to_device_master, send_to_user
 from app.utils.schedule import match_window, period_key
@@ -129,11 +129,10 @@ def iot_validate_token():
     device_uuid = payload.get("sub", "")
 
     data            = request.get_json(silent=True) or {}
-    user_uuid       = (data.get("user_uuid") or "").strip()
     encrypted_token = (data.get("encrypted_token") or "").strip()
     nonce           = (data.get("nonce") or "").strip()
 
-    if not user_uuid or not encrypted_token or not nonce:
+    if not encrypted_token or not nonce:
         return jsonify({"status": "error", "message": "Invalid payload"}), 400
 
     if not _is_hex_ciphertext(encrypted_token):
@@ -142,21 +141,31 @@ def iot_validate_token():
     if not _is_ble_otp_hex(nonce):
         return jsonify({"status": "error", "message": "Invalid nonce format"}), 400
 
+    # user_uuid를 받지 않는다. 이 기기에 매핑된 사용자의 키로 차례로 복호화해
+    # 복호화가 되고 nonce까지 일치하는 사용자를 요청자로 본다.
     with _db.Session() as session:
-        user = session.query(User).filter_by(user_uuid=user_uuid).first()
+        candidates = (
+            session.query(User)
+            .join(UserDeviceMapping, UserDeviceMapping.user_uuid == User.user_uuid)
+            .filter(UserDeviceMapping.device_uuid == device_uuid)
+            .all()
+        )
+
+    user = inner = None
+    for candidate in candidates:
+        try:
+            out = decrypt_data(os.environ["MASTER_KEK"], candidate.secret_key, encrypted_token)
+            if str(out["data"].get("nonce", "")).lower() != nonce.lower():
+                continue
+        except Exception:
+            continue
+        user, inner = candidate, out["data"]
+        break
 
     if user is None:
-        return jsonify({"status": "error", "message": "User not found"}), 400
-
-    try:
-        out   = decrypt_data(os.environ["MASTER_KEK"], user.secret_key, encrypted_token)
-        inner = out["data"]
-    except Exception:
         return jsonify({"status": "error", "message": "Invalid ciphertext or key"}), 400
+    user_uuid = user.user_uuid
 
-    if str(inner.get("nonce", "")).lower() != nonce.lower():
-        return jsonify({"status": "error", "message": "Nonce mismatch"}), 400
-    
     # 토큰 검증
     received_token = inner.get("auth_token", "")
     now = datetime.now(timezone.utc)
@@ -266,21 +275,25 @@ def iot_validate_setup():
 
     data = request.get_json(silent=True) or {}
     setup_token = (data.get("setup_token") or "").strip()
-    user_uuid = (data.get("user_uuid") or "").strip()
     secret_key = (data.get("secret_key") or "").strip()
 
-    if not setup_token or not user_uuid or not secret_key:
+    if not setup_token or not secret_key:
         return jsonify({"status": "error", "message": "Invalid payload"}), 400
 
     with _db.Session() as session:
         device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid, setup_token=setup_token).first()
         if device is None:
             return jsonify({"status": "error", "message": "Device not found"}), 400
-        
+
         # secret key 검증
         db_secret_key = decrpyt_key(os.environ["MASTER_KEK"], device.device_secret_key)
         if not hmac.compare_digest(db_secret_key.encode(), secret_key.encode()):
             return jsonify({"status": "failed", "message": "invalid key"}), 401
+
+        # master가 될 사용자는 앱이 보낸 값이 아니라 /client/setup-token 발급 시 서버가 기록한 요청자다.
+        user_uuid = device.setup_user_uuid
+        if not user_uuid or setup_claim_expired(device.setup_requested_at):
+            return jsonify({"status": "error", "message": "Setup not requested"}), 400
 
         user = session.query(User).filter_by(user_uuid=user_uuid).first()
         if user is None:

@@ -39,6 +39,16 @@ def init_db():
             conn.execute(text("ALTER TABLE device_management ADD COLUMN current_jti VARCHAR(36)"))
             conn.commit()
 
+    # 기기 설정 요청자 점유 (setup_token 발급 시 기록, 설정 완료/리셋 시 행 재생성으로 초기화)
+    for col, ddl in (
+        ("setup_user_uuid",    "ALTER TABLE device_management ADD COLUMN setup_user_uuid VARCHAR(50)"),
+        ("setup_requested_at", "ALTER TABLE device_management ADD COLUMN setup_requested_at DATETIME"),
+    ):
+        if col not in existing_device_cols:
+            with engine.connect() as conn:
+                conn.execute(text(ddl))
+                conn.commit()
+
     # geofence 반경은 앱에서 상수로 고정되어 더 이상 저장하지 않는다.
     # 컬럼이 NOT NULL로 남아 있으면 모델에서 빠진 뒤 INSERT가 실패하므로 제거한다.
     # (SQLite 3.35+ 의 DROP COLUMN 필요)

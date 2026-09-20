@@ -168,42 +168,26 @@ static void process_write_payload(const char *msg, uint16_t len)
 {
     auth_timer_stop();
 
-    // Payload format: "<36-char UUID>:<ciphertext>"
-    if (len < 38) {
-        ESP_LOGE(TAG, "Payload too short (%u bytes)", len);
-        return;
-    }
-
-    const char *colon = memchr(msg, ':', len);
-    if (!colon || (colon - msg) != 36) {
-        ESP_LOGE(TAG, "Invalid payload format (colon at %ld, expected 36)",
-                 colon ? (long)(colon - msg) : -1L);
-        return;
-    }
-
-    size_t cipher_len = len - 37;   // after the ':'
+    // Payload format: "<ciphertext>" (hex, IV + data). user_uuid는 보내지 않는다.
+    size_t cipher_len = len;
     if (cipher_len < 64 || cipher_len % 32 != 0) {
         ESP_LOGE(TAG, "Ciphertext length invalid (%zu)", cipher_len);
         return;
     }
-
-    char uuid[37];
-    memcpy(uuid, msg, 36);
-    uuid[36] = '\0';
 
     if (cipher_len >= 2048) {
         ESP_LOGE(TAG, "Ciphertext too long (%zu)", cipher_len);
         return;
     }
 
-    ESP_LOGI(TAG, "Format OK – UUID: %s", uuid);
+    ESP_LOGI(TAG, "Format OK (%zu bytes)", cipher_len);
 
     char nonce[7];
     strlcpy(nonce, s_current_otp, sizeof(nonce));
     s_current_otp[0] = '\0';
 
-    // buf is heap-allocated and null-terminated, so colon+1 is safe to pass directly
-    http_request_validate_token(uuid, colon + 1, nonce);
+    // buf is heap-allocated and null-terminated, so msg is safe to pass directly
+    http_request_validate_token(msg, nonce);
 }
 
 static int chr_write_access(uint16_t conn_handle, uint16_t attr_handle,
@@ -628,21 +612,18 @@ static void setup_flow_task(void *arg)
         cJSON *jtok  = cJSON_GetObjectItemCaseSensitive(root, "setup_token");
         cJSON *jssid = cJSON_GetObjectItemCaseSensitive(root, "wifi_ssid");
         cJSON *jpw   = cJSON_GetObjectItemCaseSensitive(root, "wifi_pw");
-        cJSON *juuid = cJSON_GetObjectItemCaseSensitive(root, "user_uuid");
 
         if (!cJSON_IsString(jtok) || !cJSON_IsString(jssid) ||
-            !cJSON_IsString(jpw)  || !cJSON_IsString(juuid)) {
+            !cJSON_IsString(jpw)) {
             cJSON_Delete(root);
             ESP_LOGE(TAG, "Setup: missing JSON fields");
             goto disconnect;
         }
 
         char setup_token[256], wifi_ssid[CFG_SSID_LEN], wifi_pw[CFG_PW_LEN];
-        char user_uuid[CFG_UUID_LEN];
         strlcpy(setup_token, jtok->valuestring,  sizeof(setup_token));
         strlcpy(wifi_ssid,   jssid->valuestring, sizeof(wifi_ssid));
         strlcpy(wifi_pw,     jpw->valuestring,   sizeof(wifi_pw));
-        strlcpy(user_uuid,   juuid->valuestring, sizeof(user_uuid));
         cJSON_Delete(root);
 
         // Step 7: ACK receipt
@@ -664,7 +645,7 @@ static void setup_flow_task(void *arg)
         // Step 8: validate setup_token with server (retry on 5xx)
         int status = 0;
         for (int srv_try = 0; srv_try < SETUP_MAX_RETRIES; srv_try++) {
-            status = http_validate_setup(setup_token, user_uuid);
+            status = http_validate_setup(setup_token);
             if (status == 200 || (status >= 400 && status < 500)) break;
             ESP_LOGW(TAG, "Setup: server error %d – retry %d", status, srv_try + 1);
             vTaskDelay(pdMS_TO_TICKS(2000));

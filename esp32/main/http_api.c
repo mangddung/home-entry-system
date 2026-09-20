@@ -281,7 +281,6 @@ static void task_iot_init(void *arg)
 }
 
 typedef struct {
-    char user_uuid[64];
     char encrypted_token[2048];
     char nonce[16];
 } validate_args_t;
@@ -300,10 +299,9 @@ static void task_validate_token(void *arg)
     }
 
     int n = snprintf(body, body_size,
-        "{\"user_uuid\":\"%s\","
-        "\"encrypted_token\":\"%s\","
+        "{\"encrypted_token\":\"%s\","
         "\"nonce\":\"%s\"}",
-        a->user_uuid, a->encrypted_token, a->nonce);
+        a->encrypted_token, a->nonce);
     free(a);
 
     if (n < 0 || (size_t)n >= body_size) {
@@ -489,8 +487,7 @@ void http_fetch_iot_init(void)
     xTaskCreate(task_iot_init, "http_init", 6144, NULL, 5, NULL);
 }
 
-void http_request_validate_token(const char *user_uuid,
-                                  const char *encrypted_token,
+void http_request_validate_token(const char *encrypted_token,
                                   const char *nonce)
 {
     validate_args_t *a = malloc(sizeof(validate_args_t));
@@ -498,7 +495,6 @@ void http_request_validate_token(const char *user_uuid,
         ESP_LOGE(TAG, "OOM for validate_args");
         return;
     }
-    strlcpy(a->user_uuid,       user_uuid,       sizeof(a->user_uuid));
     strlcpy(a->encrypted_token, encrypted_token, sizeof(a->encrypted_token));
     strlcpy(a->nonce,           nonce,           sizeof(a->nonce));
     xTaskCreate(task_validate_token, "http_val", 5120, a, 5, NULL);
@@ -509,12 +505,12 @@ void http_start_ping_task(void)
     xTaskCreate(task_ping, "http_ping", 6144, NULL, 4, NULL);
 }
 
-int http_validate_setup(const char *setup_token, const char *user_uuid)
+int http_validate_setup(const char *setup_token)
 {
     char body[512];
     int n = snprintf(body, sizeof(body),
-                     "{\"setup_token\":\"%s\",\"user_uuid\":\"%s\",\"secret_key\":\"%s\"}",
-                     setup_token, user_uuid, IOT_DEVICE_SECRET_KEY);
+                     "{\"setup_token\":\"%s\",\"secret_key\":\"%s\"}",
+                     setup_token, IOT_DEVICE_SECRET_KEY);
     if (n < 0 || (size_t)n >= sizeof(body)) {
         ESP_LOGE(TAG, "validate_setup body truncated");
         return 0;
