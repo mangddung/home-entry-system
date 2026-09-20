@@ -14,10 +14,12 @@ from app.utils.database import database as _db
 from app.utils.database import UserRefreshToken, TokenBlacklist, KakaoOAuthToken, User
 from app.utils.log_utils import log_activity
 from app.utils.fcm_utils import send_to_user, send_to_device_master
+from app.utils.limiter import limiter
 
 KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
+limiter.limit("10/minute")(auth_bp)
 
 ACCESS_TOKEN_TTL  = timedelta(hours=24)
 REFRESH_TOKEN_TTL = timedelta(days=30)

@@ -9,6 +9,7 @@ from flask import Flask
 from flask_cors import CORS
 
 from app.utils.database import init_db
+from app.utils.limiter import limiter
 from app.routes.client.auth import auth_bp
 from app.routes.client.oauth import kakao_bp
 from app.routes.client.devices import client_bp
@@ -28,6 +29,7 @@ def create_app():
     app = Flask(__name__)
 
     CORS(app)
+    limiter.init_app(app)
 
     init_db()
 

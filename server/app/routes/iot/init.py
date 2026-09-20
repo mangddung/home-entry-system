@@ -15,6 +15,7 @@ from app.utils.device_utils import _generate_device_secret, _issue_device_jwt, i
 from app.utils.log_utils import log_activity
 from app.utils.fcm_utils import send_to_device_master, send_to_user
 from app.utils.schedule import match_window, period_key
+from app.utils.limiter import limiter
 
 iot_bp = Blueprint("iot", __name__, url_prefix="/iot")
 
@@ -114,6 +115,7 @@ def iot_init():
 
 # POST /iot/validate_token
 @iot_bp.route("/validate_token", methods=["POST"])
+@limiter.limit("20/minute")
 def iot_validate_token():
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):

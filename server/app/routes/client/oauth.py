@@ -9,8 +9,10 @@ from app.utils.database import database as _db
 from app.utils.database import User, KakaoOAuthToken
 from app.routes.client.auth import issue_token_pair
 from app.utils.log_utils import log_activity
+from app.utils.limiter import limiter
 
 kakao_bp = Blueprint("kakao", __name__, url_prefix="/auth")
+limiter.limit("10/minute")(kakao_bp)
 
 KAKAO_TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 KAKAO_USER_URL  = "https://kapi.kakao.com/v2/user/me"
