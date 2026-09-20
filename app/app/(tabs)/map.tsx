@@ -233,7 +233,7 @@ export default function MapScreen() {
       void loadDevices().then((list) =>
         setDevices(
           list
-            .filter((d) => !!d.location && d.location.latitude !== null)
+            .filter((d) => !!d.location)
             .map((d) => ({
               device_uuid: d.device_uuid,
               device_nickname: d.device_nickname,

@@ -181,8 +181,8 @@ export const updateGeoFence = async () => {
   const validDevices = devices.filter(
     (device) =>
       device.location &&
-      device.location.latitude !== undefined &&
-      device.location.longitude !== undefined &&
+      typeof device.location.latitude === "number" &&
+      typeof device.location.longitude === "number" &&
       (device.role !== "guest" || isTokenAlive(device.auth_token)),
   );
   const geoFences = validDevices.map((device) => ({

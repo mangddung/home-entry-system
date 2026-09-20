@@ -103,9 +103,9 @@ def get_user_devices():
                 },
                 "auth_token": _get_or_create_token(session, m.user_uuid, m.device_uuid, m.role),
                 "location": {
-                    "latitude":    m.device.location.latitude    if m.device.location else None,
-                    "longitude":   m.device.location.longitude   if m.device.location else None,
-                },
+                    "latitude":    m.device.location.latitude,
+                    "longitude":   m.device.location.longitude,
+                } if m.device.location else None,
                 "last_ping_at": m.device.last_ping_at.isoformat() + "Z" if m.device.last_ping_at else None,
             }
             for m in mappings
@@ -133,10 +133,7 @@ def get_setup_uuid():
                 "ble_manufacturer_uuid": None,
             },
             "auth_token": None,
-            "location": {
-                "latitude":    None,
-                "longitude":   None,
-            },
+            "location": None,
             "last_ping_at": None,
         }
     }), 200
