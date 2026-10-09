@@ -1,19 +1,25 @@
+import { CustomAlert } from "@/components/custom-alert";
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { loadDevices } from "@/lib/api/devices";
-import { GEOFENCE_RADIUS_M } from "@/lib/constants";
+import { userTokenExchange } from "@/lib/ble";
+import { GEOFENCE_RADIUS_M, SELECTED_DEVICE_KEY } from "@/lib/constants";
+import { isTokenUsableNow } from "@/lib/schedule";
 import { readLogs } from "@/lib/system-log";
+import { setTokenSecure } from "@/lib/token-storage";
+import type { IoTDevice } from "@/lib/types";
 import * as Location from "expo-location";
 import { LocationObject } from "expo-location";
-import { useFocusEffect } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import { WebView } from "react-native-webview";
+import { ActivityIndicator, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
 type DeviceLocation = {
   device_uuid: string;
   device_nickname: string | null;
   location: { latitude: number; longitude: number };
+  usable: boolean; // 지금 인증 가능한 토큰 보유 여부 (상세 사유는 기기 상세 화면에서)
 };
 
 type GpsPoint = {
@@ -87,21 +93,51 @@ const mapHTML = `
       });
     }
 
+    function post(msg) {
+      window.ReactNativeWebView.postMessage(JSON.stringify(msg));
+    }
+
+    // 팝업: 기기 이름(탭 → 상세), 사용 가능 여부, 사용 가능하면 문 열기 버튼.
+    // 이름은 textContent로만 넣는다(HTML 해석 안 됨).
+    function devicePopup(d, name) {
+      var box = document.createElement('div');
+      box.style.cssText = 'min-width:150px;font-size:13px;';
+      var title = document.createElement('div');
+      title.textContent = name;
+      title.style.cssText = 'font-weight:700;color:#1a73e8;text-decoration:underline;cursor:pointer;margin-bottom:4px;';
+      title.onclick = function() { post({ type: 'detail', uuid: d.device_uuid }); };
+      var status = document.createElement('div');
+      status.textContent = d.usable ? '● 사용 가능' : '○ 사용 불가';
+      status.style.cssText = 'color:' + (d.usable ? '#16a34a' : '#6b7280') + ';';
+      box.appendChild(title);
+      box.appendChild(status);
+      if (d.usable) {
+        var btn = document.createElement('button');
+        btn.textContent = '문 열기';
+        btn.style.cssText = 'width:100%;margin-top:8px;padding:8px 0;border:none;border-radius:6px;background:#16a34a;color:#fff;font-size:13px;font-weight:600;';
+        btn.onclick = function() { post({ type: 'unlock', uuid: d.device_uuid }); };
+        box.appendChild(btn);
+      }
+      return box;
+    }
+
     function addDeviceMarkers(devices) {
       deviceLayers.forEach(function(l) { map.removeLayer(l); });
       deviceLayers = [];
       devices.forEach(function(d) {
-        var label = esc(d.device_nickname || d.device_uuid.substring(0, 8) + '...');
+        var name = d.device_nickname || d.device_uuid.substring(0, 8) + '...';
+        var label = esc(name);
+        var color = d.usable ? '#16a34a' : '#9CA3AF';
         var lat = d.location.latitude;
         var lon = d.location.longitude;
         var range = ${GEOFENCE_RADIUS_M};
         var icon = L.divIcon({
           className: '',
-          html: '<div style="background:#E53935;color:#fff;padding:2px 5px;border-radius:4px;font-size:11px;white-space:nowrap;">' + label + '</div>',
+          html: '<div style="background:' + color + ';color:#fff;padding:2px 5px;border-radius:4px;font-size:11px;white-space:nowrap;">' + label + '</div>',
           iconAnchor: [18, 8]
         });
-        var m = L.marker([lat, lon], { icon: icon }).addTo(map).bindPopup(label);
-        var c = L.circle([lat, lon], { radius: range, color: '#E53935', fillOpacity: 0.1 }).addTo(map);
+        var m = L.marker([lat, lon], { icon: icon }).addTo(map).bindPopup(devicePopup(d, name));
+        var c = L.circle([lat, lon], { radius: range, color: color, fillOpacity: 0.1 }).addTo(map);
         deviceLayers.push(m, c);
       });
     }
@@ -187,6 +223,11 @@ export default function MapScreen() {
   const mapReadyRef = useRef(false);
   const centeredRef = useRef(false);
   const [devices, setDevices] = useState<DeviceLocation[]>([]);
+  const fullDevicesRef = useRef<IoTDevice[]>([]);
+  const [unlocking, setUnlocking] = useState(false);
+  const unlockingRef = useRef(false);
+  const [alertConfig, setAlertConfig] = useState<{ title: string; message?: string } | null>(null);
+  const showAlert = (title: string, message?: string) => setAlertConfig({ title, message });
 
   const [showTimeline, setShowTimeline] = useState(false);
   const [gpsData, setGpsData] = useState<Record<string, GpsPoint[]>>({});
@@ -230,7 +271,8 @@ export default function MapScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      void loadDevices().then((list) =>
+      void loadDevices().then((list) => {
+        fullDevicesRef.current = list;
         setDevices(
           list
             .filter((d) => !!d.location)
@@ -238,11 +280,51 @@ export default function MapScreen() {
               device_uuid: d.device_uuid,
               device_nickname: d.device_nickname,
               location: d.location!,
+              usable: isTokenUsableNow(d.auth_token),
             })),
-        ),
-      );
+        );
+      });
     }, []),
   );
+
+  // 지도 팝업에서 온 요청: 기기 상세 이동 / 수동 인증
+  const onMapMessage = async (e: WebViewMessageEvent) => {
+    let msg: { type?: string; uuid?: string };
+    try {
+      msg = JSON.parse(e.nativeEvent.data);
+    } catch {
+      return;
+    }
+    const device = fullDevicesRef.current.find((d) => d.device_uuid === msg.uuid);
+    if (!device) return;
+
+    if (msg.type === "detail") {
+      await setTokenSecure(SELECTED_DEVICE_KEY, JSON.stringify(device));
+      router.push("/device/device_info");
+      return;
+    }
+    if (msg.type !== "unlock" || unlockingRef.current) return;
+    // 팝업은 화면 진입 시점 기준이라 누른 시점에 다시 확인한다
+    if (!isTokenUsableNow(device.auth_token)) {
+      showAlert("사용 불가", "지금은 이 기기를 열 수 없습니다. 기기 상세에서 키 상태를 확인하세요.");
+      return;
+    }
+    unlockingRef.current = true;
+    setUnlocking(true);
+    try {
+      const success = await userTokenExchange(device);
+      if (success) {
+        showAlert("수동 인증", "인증 요청을 보냈습니다.");
+      } else {
+        showAlert("오류", "기기에 연결할 수 없습니다. 기기가 오프라인 상태이거나 범위 밖에 있는지 확인하세요.");
+      }
+    } catch {
+      showAlert("오류", "인증 중 오류가 발생했습니다.");
+    } finally {
+      unlockingRef.current = false;
+      setUnlocking(false);
+    }
+  };
 
   useEffect(() => {
     if (!mapReadyRef.current || devices.length === 0) return;
@@ -314,6 +396,23 @@ export default function MapScreen() {
         domStorageEnabled
         originWhitelist={["*"]}
         onLoad={onMapLoad}
+        onMessage={onMapMessage}
+      />
+
+      {unlocking && (
+        <View style={styles.unlockOverlay}>
+          <View style={[styles.unlockBox, { backgroundColor: isDark ? "#1E2124" : "#fff" }]}>
+            <ActivityIndicator color="#16a34a" />
+            <Text style={[styles.unlockText, { color: colors.text }]}>인증 중...</Text>
+          </View>
+        </View>
+      )}
+
+      <CustomAlert
+        visible={!!alertConfig}
+        title={alertConfig?.title ?? ""}
+        message={alertConfig?.message}
+        onRequestClose={() => setAlertConfig(null)}
       />
 
       {/* Timeline toggle button */}
@@ -372,6 +471,24 @@ export default function MapScreen() {
 
 const styles = StyleSheet.create({
   map: { flex: 1 },
+  unlockOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.3)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  unlockBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 12,
+  },
+  unlockText: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
   timelineBtn: {
     position: "absolute",
     top: 16,

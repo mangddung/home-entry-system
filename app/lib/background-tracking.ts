@@ -10,7 +10,6 @@ import {
   BG_LOCATION_TASK,
   GEOFENCE_RADIUS_M,
 } from "./constants";
-import { isTokenAlive } from "./schedule";
 import { appendSystemLog } from "./system-log";
 import { IoTDevice } from "./types";
 
@@ -175,15 +174,14 @@ let lastGeoFenceSignature = ""; // 직전 등록 내용과 같으면 재등록 �
 
 export const updateGeoFence = async () => {
   const devices: IoTDevice[] = await loadDevices();
-  // 좌표있는 디바이스만 필터링. 게스트는 만료 전 토큰이 있을 때만 감시한다(없으면 BLE를 시도할 수 없다).
-  // 스케줄 시간대는 여기서 보지 않는다: 시간대 전에 반경 안에 들어와 머물면 진입 이벤트가 다시 오지 않으므로
-  // 지오펜스는 켜두고 BLE 루프가 시간대를 기다린다(tasks/bg-location.ts).
+  // 좌표있는 디바이스만 필터링. 게스트는 수동 인증 전용이라 감시하지 않는다(지도/상세 화면에서 연다).
+  // 게스트 기기만 있으면 geofence 태스크 자체가 등록되지 않는다.
   const validDevices = devices.filter(
     (device) =>
       device.location &&
       typeof device.location.latitude === "number" &&
       typeof device.location.longitude === "number" &&
-      (device.role !== "guest" || isTokenAlive(device.auth_token)),
+      device.role !== "guest",
   );
   const geoFences = validDevices.map((device) => ({
     identifier: device.device_uuid,
