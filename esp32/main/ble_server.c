@@ -267,37 +267,19 @@ static void adv_set_name_rsp(void)
 }
 
 // ── Advertising ───────────────────────────────────────────────────────────────
-#define ADV_DURATION_MS  60000
-#define ADV_PAUSE_MS     3000
-
-static void adv_pause_task(void *arg)
-{
-    vTaskDelay(pdMS_TO_TICKS(ADV_PAUSE_MS));
-    if (s_adv_enabled && s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-        struct ble_gap_adv_params params = {
-            .conn_mode = BLE_GAP_CONN_MODE_UND,
-            .disc_mode = BLE_GAP_DISC_MODE_GEN,
-        };
-        struct ble_hs_adv_fields fields = {
-            .flags              = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
-            .uuids128           = &s_svc_uuid,
-            .num_uuids128       = 1,
-            .uuids128_is_complete = 1,
-        };
-        ble_gap_adv_set_fields(&fields);
-        adv_set_name_rsp();
-        ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, ADV_DURATION_MS,
-                          &params, gap_event_handler, NULL);
-        ESP_LOGI(TAG, "BLE advertising (6s)");
-    }
-    vTaskDelete(NULL);
-}
+// 쉬는 구간 없이 고정 간격으로 계속 광고한다. 앱의 근접 해제(RSSI 중앙값 판정)가
+// 고른 샘플을 받아야 해제 지연이 들쭉날쭉하지 않다. 예전 방식(30~60ms 광고 + 3초 휴식)과
+// 초당 광고 횟수가 비슷해 전력도 비슷한 수준으로 본다.
+// TODO(실측): 소비 전류와 앱 샘플 수신율을 재고 간격 조정. 간격·TX 출력을 바꾸면 RSSI 보정값을 다시 재야 한다.
+#define ADV_ITVL_MS  100
 
 static void ble_advertise(void)
 {
     struct ble_gap_adv_params params = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        .itvl_min  = BLE_GAP_ADV_ITVL_MS(ADV_ITVL_MS),
+        .itvl_max  = BLE_GAP_ADV_ITVL_MS(ADV_ITVL_MS),
     };
     struct ble_hs_adv_fields fields = {
         .flags              = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
@@ -307,10 +289,10 @@ static void ble_advertise(void)
     };
     ble_gap_adv_set_fields(&fields);
     adv_set_name_rsp();
-    ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, ADV_DURATION_MS,
+    ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, BLE_HS_FOREVER,
                       &params, gap_event_handler, NULL);
-    ESP_LOGI(TAG, "BLE advertising (3s) svc=%s read=%s write=%s mfr=%s",
-             g_cfg.ble_svc_uuid, g_cfg.ble_chr_read_uuid,
+    ESP_LOGI(TAG, "BLE advertising (%dms interval) svc=%s read=%s write=%s mfr=%s",
+             ADV_ITVL_MS, g_cfg.ble_svc_uuid, g_cfg.ble_chr_read_uuid,
              g_cfg.ble_chr_write_uuid, g_cfg.manufacturer_uuid);
 }
 
@@ -381,9 +363,11 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
             break;
 
         case BLE_GAP_EVENT_ADV_COMPLETE:
-            ESP_LOGI(TAG, "BLE adv ended – pausing %dms", ADV_PAUSE_MS);
-            if (s_adv_enabled && s_conn_handle == BLE_HS_CONN_HANDLE_NONE)
-                xTaskCreate(adv_pause_task, "adv_pause", 2048, NULL, 3, NULL);
+            // 무기한 광고라 연결 외 사유로 끝났을 때만 다시 시작한다
+            ESP_LOGI(TAG, "BLE adv ended (reason %d)", event->adv_complete.reason);
+            if (event->adv_complete.reason != 0 && s_adv_enabled &&
+                s_conn_handle == BLE_HS_CONN_HANDLE_NONE)
+                ble_advertise();
             break;
 
         default:
