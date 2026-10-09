@@ -1,5 +1,4 @@
 import axios from "axios";
-import { router } from "expo-router";
 import {
   BACKEND_URL,
   DEVICE_KEY_PREFIX,
@@ -175,7 +174,6 @@ export const fetchDeviceLocation = async (
     );
 
     const data = response.data.data;
-    router.push("/home");
     return { type: "success", message: "success" };
   } catch (error) {
     return { type: "error", message: getApiErrorMessage(error) };

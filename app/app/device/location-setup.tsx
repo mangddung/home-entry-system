@@ -236,6 +236,16 @@ export default function LocationSetupScreen() {
   const btnBottom = useRef(new Animated.Value(BTN_BOTTOM_DEFAULT)).current;
   const mapReadyRef = useRef(false);
   const existingDevicesRef = useRef<IoTDevice[]>([]);
+  const watchRef = useRef<Location.LocationSubscription | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+      watchRef.current?.remove();
+    },
+    [],
+  );
 
   const [targetDevice, setTargetDevice] = useState<{ device_uuid: string } | null>(null);
   const [pendingLocation, setPendingLocation] = useState<{ lat: number; lng: number } | null>(null);
@@ -301,16 +311,33 @@ export default function LocationSetupScreen() {
           `goToLocation(${last.coords.latitude}, ${last.coords.longitude}); true;`,
         );
       }
-      const fix = (await Promise.race([
-        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 15000)),
-      ])) as Location.LocationObject | null;
-      if (fix) {
-        webViewRef.current?.injectJavaScript(
-          `goToLocation(${fix.coords.latitude}, ${fix.coords.longitude}, ${last ? "true" : "false"}); true;`,
-        );
-      } else if (!last) {
-        Toast.info("현재 위치를 가져오지 못했습니다");
+      // 지도 탭과 같은 High 모드 연속 수신. 첫 fix는 거칠 수 있어 정확도가 나아질 때만 핀을 보정한다
+      // (사용자가 핀을 직접 찍었으면 웹뷰 쪽 goToLocation이 무시)
+      let bestAccuracy = Infinity;
+      const sub = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.High, distanceInterval: 10, timeInterval: 5000 },
+        (fix) => {
+          const accuracy = fix.coords.accuracy ?? Number.MAX_VALUE;
+          if (accuracy >= bestAccuracy) return;
+          const refine = last || bestAccuracy !== Infinity ? "true" : "false";
+          bestAccuracy = accuracy;
+          webViewRef.current?.injectJavaScript(
+            `goToLocation(${fix.coords.latitude}, ${fix.coords.longitude}, ${refine}); true;`,
+          );
+        },
+      );
+      // 구독을 기다리는 사이 화면을 떠났거나 버튼을 다시 눌렀을 수 있다 → 이전 구독 정리, 떠났으면 즉시 해제
+      watchRef.current?.remove();
+      if (!mountedRef.current) {
+        sub.remove();
+        watchRef.current = null;
+        return;
+      }
+      watchRef.current = sub;
+      if (!last) {
+        setTimeout(() => {
+          if (bestAccuracy === Infinity) Toast.info("현재 위치를 가져오지 못했습니다");
+        }, 15000);
       }
     } catch {
       Toast.info("현재 위치를 가져오지 못했습니다");
