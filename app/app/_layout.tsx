@@ -6,6 +6,7 @@ import { updateGeoFence } from "@/lib/background-tracking";
 import { appendFcmNotification } from "@/lib/fcm-log";
 import { DEVICES_REFRESHED_EVENT } from "@/lib/constants";
 import { registerSessionAlert } from "@/lib/session-alert";
+import { applyThemePref, getThemePref } from "@/lib/theme-pref";
 import "@/tasks/bg-location";
 import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native";
 import { getApp } from "@react-native-firebase/app";
@@ -74,6 +75,10 @@ export default function RootLayout() {
     onConfirm: () => void;
   } | null>(null);
   const onConfirmRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    void getThemePref().then(applyThemePref);
+  }, []);
 
   useEffect(() => {
     registerSessionAlert((title, message, onConfirm) => {

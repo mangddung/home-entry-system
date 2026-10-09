@@ -10,6 +10,7 @@ import { useColorScheme } from "@/hooks/use-color-scheme";
 import { AlertButton, CustomAlert } from "@/components/custom-alert";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { Provider } from "@ant-design/react-native";
+import { getThemePref, setThemePref, type ThemePref } from "@/lib/theme-pref";
 import { router } from "expo-router";
 import { useEffect, useState } from "react";
 import { PermissionsAndroid, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
@@ -25,6 +26,8 @@ async function checkBlePermission(): Promise<boolean> {
   const location = await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
   return scan && connect && location;
 }
+
+const THEME_LABEL: Record<ThemePref, string> = { system: "시스템", light: "라이트", dark: "다크" };
 
 type SettingRowProps = {
   icon: React.ComponentProps<typeof MaterialCommunityIcons>["name"];
@@ -65,8 +68,11 @@ export default function SettingsScreen() {
   const cardBg = isDark ? "#1e2022" : "#f3f4f6";
   const dividerColor = isDark ? "#2a2d2e" : "#e5e7eb";
 
+  const [themePref, setThemePrefState] = useState<ThemePref | null>(null);
+
   useEffect(() => {
     checkBlePermission().then(setBleGranted);
+    getThemePref().then(setThemePrefState);
   }, []);
 
   const handleRequestBle = async () => {
@@ -135,6 +141,44 @@ export default function SettingsScreen() {
                     <Text style={[styles.badgeText, { color: bleGranted ? "#15803d" : "#b91c1c" }]}>
                       {bleGranted ? "허용됨" : "거부됨"}
                     </Text>
+                  </View>
+                ) : null
+              }
+            />
+          </View>
+        </View>
+
+        {/* 화면 섹션 */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: colors.icon }]}>화면</Text>
+          <View style={[styles.card, { backgroundColor: cardBg }]}>
+            <SettingRow
+              icon="theme-light-dark"
+              iconColor="#fff"
+              iconBg="#64748b"
+              label="테마"
+              textColor={colors.text}
+              chevron={false}
+              rightContent={
+                themePref !== null ? (
+                  <View style={[styles.segment, { backgroundColor: isDark ? "#2a2d2e" : "#e5e7eb" }]}>
+                    {(["system", "light", "dark"] as const).map((p) => {
+                      const selected = themePref === p;
+                      return (
+                        <TouchableOpacity
+                          key={p}
+                          style={[styles.segmentItem, selected && { backgroundColor: "#3B82F6" }]}
+                          onPress={() => {
+                            setThemePrefState(p);
+                            void setThemePref(p);
+                          }}
+                        >
+                          <Text style={[styles.segmentText, { color: selected ? "#fff" : colors.icon }]}>
+                            {THEME_LABEL[p]}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
                 ) : null
               }
@@ -255,5 +299,19 @@ const styles = StyleSheet.create({
   divider: {
     height: StyleSheet.hairlineWidth,
     marginLeft: 60,
+  },
+  segment: {
+    flexDirection: "row",
+    borderRadius: 8,
+    padding: 2,
+  },
+  segmentItem: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  segmentText: {
+    fontSize: 12,
+    fontWeight: "600",
   },
 });

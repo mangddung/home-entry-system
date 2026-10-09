@@ -29,6 +29,7 @@ function getRoleAccent(role: string, isDark: boolean) {
         label: "마스터",
         borderColor: isDark ? "#FBBF24" : "#F59E0B",
         pillBg: isDark ? "rgba(251,191,36,0.15)" : "#FEF3C7",
+        iconBg: isDark ? "#FBBF24D9" : "#FEF3C7",
         pillColor: isDark ? "#FBBF24" : "#D97706",
       };
     case "member":
@@ -37,6 +38,7 @@ function getRoleAccent(role: string, isDark: boolean) {
         label: "멤버",
         borderColor: isDark ? "#60A5FA" : "#3B82F6",
         pillBg: isDark ? "rgba(96,165,250,0.15)" : "#DBEAFE",
+        iconBg: isDark ? "#60A5FAD9" : "#DBEAFE",
         pillColor: isDark ? "#60A5FA" : "#2563EB",
       };
     default:
@@ -45,6 +47,7 @@ function getRoleAccent(role: string, isDark: boolean) {
         label: "게스트",
         borderColor: isDark ? "#4B5563" : "#D1D5DB",
         pillBg: isDark ? "rgba(156,163,175,0.15)" : "#F3F4F6",
+        iconBg: isDark ? "#9CA3AFD9" : "#F3F4F6",
         pillColor: isDark ? "#9CA3AF" : "#6B7280",
       };
   }
@@ -207,7 +210,7 @@ export default function HomeScreen() {
                       router.push("/device/device_info");
                     }}
                   >
-                    <View style={[styles.cardIconWrap, { backgroundColor: roleAccent.pillBg }]}>
+                    <View style={[styles.cardIconWrap, { backgroundColor: roleAccent.iconBg }]}>
                       <Image source={require("@/assets/images/icon-door-lock.png")} style={styles.icon} />
                     </View>
                     <View style={styles.cardContent}>

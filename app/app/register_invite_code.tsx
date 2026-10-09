@@ -223,7 +223,7 @@ export default function RegisterInviteCodeScreen() {
                 <Text style={[styles.buttonText, { color: colors.icon }]}>나중에</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.button, { backgroundColor: nickname.trim() ? colors.tint : "#9CA3AF", flex: 1 }]}
+                style={[styles.button, { backgroundColor: nickname.trim() ? "#3B82F6" : "#9CA3AF", flex: 1 }]}
                 disabled={!nickname.trim()}
                 onPress={handleNicknameConfirm}
               >

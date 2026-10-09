@@ -1208,7 +1208,8 @@ export default function DeviceInfoView() {
             <View
               style={[
                 styles.deviceIconCircle,
-                { backgroundColor: isDark ? "rgba(10,126,164,0.15)" : "#EFF8FC" },
+                // 홈 카드와 같은 역할 색: 다크는 역할 색 85%(넓은 면적이라 글씨보다 밝아 보이는 것 보정)
+                { backgroundColor: isDark ? `${myRole.color}D9` : myRole.bg },
               ]}
             >
               <Image
@@ -1544,7 +1545,7 @@ export default function DeviceInfoView() {
                       {buildInviteUrl(inviteResult.invite_code)}
                     </Text>
                     <TouchableOpacity
-                      style={[styles.copyBtn, { backgroundColor: colors.tint }]}
+                      style={[styles.copyBtn, { backgroundColor: "#3B82F6" }]}
                       onPress={() => {
                         Clipboard.setString(buildInviteUrl(inviteResult.invite_code));
                         showAlert("복사됨", "초대 링크가 복사되었습니다.");
