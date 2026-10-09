@@ -78,7 +78,17 @@ with _db.Session() as s:
 r = c.post("/iot/ping", json={}, headers={"Authorization": f"Bearer {device_token}"})
 assert r.status_code == 200, r.data
 assert last_ping() is not None
+assert r.get_json()["registered"] is True, r.data
 print("[ok] /iot/ping도 그대로 동작한다")
+
+# 마스터 매핑이 없으면(앱에서 삭제) registered=false로 기기에 초기화를 알린다
+with _db.Session() as s:
+    s.query(UserDeviceMapping).filter_by(device_uuid=DEV).delete()
+    s.commit()
+r = c.post("/iot/ping", json={}, headers={"Authorization": f"Bearer {device_token}"})
+assert r.status_code == 200, r.data
+assert r.get_json()["registered"] is False, r.data
+print("[ok] 삭제된 기기는 ping 응답에 registered=false를 받는다")
 
 # 잘못된 토큰은 갱신하지 않는다
 with _db.Session() as s:

@@ -377,10 +377,14 @@ static void task_ping(void *arg)
 {
     for (;;) {
         char auth_header[CFG_TOKEN_LEN + 8];
+        char resp_body[128];
+        resp_buf_t rb = { .buf = resp_body, .size = sizeof(resp_body), .len = 0 };
         int status = 0;
 
         for (int attempt = 0; attempt < 2; attempt++) {
             snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_cfg.device_token);
+            rb.len = 0;
+            resp_body[0] = '\0';
 
             esp_http_client_config_t cfg = {
                 .url                   = HA_PING_URL,
@@ -388,6 +392,8 @@ static void task_ping(void *arg)
                 .timeout_ms            = HTTP_TIMEOUT_MS,
                 .disable_auto_redirect = true,
                 .buffer_size_tx        = CFG_TOKEN_LEN + 256,
+                .event_handler         = http_event_cb,
+                .user_data             = &rb,
                 .crt_bundle_attach     = esp_crt_bundle_attach,
             };
             esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -412,6 +418,17 @@ static void task_ping(void *arg)
 
         TickType_t delay_ms;
         if (status == 200) {
+            // 마스터가 앱에서 기기를 삭제하면 서버가 registered=false를 준다 → 셋업 모드로 복귀.
+            // 명시적 false일 때만 반응한다(파싱 실패·필드 누락은 무시해 오초기화를 막는다).
+            cJSON *root = cJSON_Parse(resp_body);
+            cJSON *reg  = root ? cJSON_GetObjectItemCaseSensitive(root, "registered") : NULL;
+            bool unregistered = cJSON_IsFalse(reg);
+            cJSON_Delete(root);
+            if (unregistered) {
+                ESP_LOGW(TAG, "Device unregistered on server – factory reset");
+                device_config_factory_reset();  // never returns
+            }
+
             ESP_LOGI(TAG, "Ping OK – next in 5 min");
             if (!s_init_ok && !s_init_running) {
                 ESP_LOGI(TAG, "Init not done – retrying iot_init");
@@ -484,7 +501,7 @@ void http_notify_reset(void)
 void http_fetch_iot_init(void)
 {
     s_init_running = true;
-    xTaskCreate(task_iot_init, "http_init", 6144, NULL, 5, NULL);
+    xTaskCreate(task_iot_init, "http_init", 10240, NULL, 5, NULL);
 }
 
 void http_request_validate_token(const char *encrypted_token,
@@ -497,12 +514,12 @@ void http_request_validate_token(const char *encrypted_token,
     }
     strlcpy(a->encrypted_token, encrypted_token, sizeof(a->encrypted_token));
     strlcpy(a->nonce,           nonce,           sizeof(a->nonce));
-    xTaskCreate(task_validate_token, "http_val", 5120, a, 5, NULL);
+    xTaskCreate(task_validate_token, "http_val", 9216, a, 5, NULL);
 }
 
 void http_start_ping_task(void)
 {
-    xTaskCreate(task_ping, "http_ping", 6144, NULL, 4, NULL);
+    xTaskCreate(task_ping, "http_ping", 10240, NULL, 4, NULL);
 }
 
 int http_validate_setup(const char *setup_token)

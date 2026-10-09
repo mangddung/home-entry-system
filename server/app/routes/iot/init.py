@@ -256,8 +256,12 @@ def iot_ping():
     # last_ping_at은 _decode_device_token에서 갱신된다(기기 요청 전체 공통)
     device_uuid = payload.get("sub")
 
+    # registered=false면 기기가 스스로 초기화해 셋업 모드로 돌아간다(마스터가 앱에서 삭제한 경우)
+    with _db.Session() as session:
+        registered = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first() is not None
+
     log_activity("device_ping", device_uuid=device_uuid)
-    return jsonify({"status": "success", "message": "pong"}), 200
+    return jsonify({"status": "success", "message": "pong", "registered": registered}), 200
 
 # POST /iot/validate_setup
 @iot_bp.route("/validate_setup", methods=["POST"])
