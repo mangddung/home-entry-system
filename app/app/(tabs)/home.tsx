@@ -6,6 +6,7 @@ import { sweepOrphanBonds } from "@/lib/bond";
 import { updateGeoFence } from "@/lib/background-tracking";
 import { loadFcmNotifications, getFcmLastReadAt, setFcmLastReadAt, type FcmNotificationItem } from "@/lib/fcm-log";
 import {
+  DEVICES_REFRESHED_EVENT,
   IS_ONLINE_KEY,
   SELECTED_DEVICE_KEY,
   UNFIGURED_DEVICES_KEY,
@@ -17,7 +18,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useIsFocused } from "@react-navigation/native";
 import { router } from "expo-router";
 import { useEffect, useState } from "react";
-import { FlatList, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { DeviceEventEmitter, FlatList, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 const ROLE_ORDER: Record<string, number> = { master: 0, member: 1, guest: 2 };
 
@@ -123,7 +124,14 @@ export default function HomeScreen() {
     })();
 
     const interval = setInterval(() => { void refreshDevices(); }, 30_000);
-    return () => clearInterval(interval);
+    // 푸시 핸들러가 이미 서버 동기화·지오펜스 갱신을 마쳤으므로 캐시만 다시 읽는다(추방·삭제 즉시 반영)
+    const subscription = DeviceEventEmitter.addListener(DEVICES_REFRESHED_EVENT, async () => {
+      setUserDevices(await loadDevices());
+    });
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
+    };
   }, [isFocused]);
 
   const cardBg = isDark ? "#1e2022" : "#f3f4f6";

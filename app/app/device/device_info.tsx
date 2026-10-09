@@ -514,6 +514,10 @@ export default function DeviceInfoView() {
   } | null>(null);
   const showAlert = (title: string, message?: string, buttons?: AlertButton[]) =>
     setAlertConfig({ title, message, buttons });
+  // 내가 삭제·탈퇴 중이면 서버 푸시가 응답보다 먼저 와도 "접근 불가" 알림을 띄우지 않는다
+  const selfRemovingRef = useRef(false);
+  // 추방·삭제로 기기가 목록에서 빠짐 → 알림을 어떻게 닫든 홈으로 보낸다
+  const deviceGoneRef = useRef(false);
 
   const handleNicknameConfirm = async () => {
     if (!device || !nicknameInput.trim()) return;
@@ -636,7 +640,13 @@ export default function DeviceInfoView() {
     const sync = async () => {
       await fetchDevices();
       const latest = (await loadDevices()).find((d) => d.device_uuid === device_uuid);
-      if (!latest) return;
+      if (!latest) {
+        if (!selfRemovingRef.current && !deviceGoneRef.current) {
+          deviceGoneRef.current = true;
+          setAlertConfig({ title: "기기 접근 불가", message: "기기가 삭제되었거나 그룹에서 추방되었습니다." });
+        }
+        return;
+      }
       setDevice((prev) => (JSON.stringify(prev) === JSON.stringify(latest) ? prev : latest));
       // device 객체가 그대로면 아래 토큰 조회 effect가 다시 돌지 않으므로 여기서 같이 갱신한다
       if (myUuid && role !== "master") {
@@ -1983,6 +1993,7 @@ export default function DeviceInfoView() {
                   disabled={!canConfirmLeave || isDeleting}
                   onPress={async () => {
                     setIsDeleting(true);
+                    selfRemovingRef.current = true;
                     const result =
                       device.role === "master"
                         ? await deleteDevice(device.device_uuid)
@@ -1993,6 +2004,7 @@ export default function DeviceInfoView() {
                       setDeleteVisible(false);
                       router.push("/home");
                     } else {
+                      selfRemovingRef.current = false;
                       showAlert("삭제 실패", result?.message ?? "오류가 발생했습니다.");
                     }
                   }}
@@ -2301,7 +2313,10 @@ export default function DeviceInfoView() {
         title={alertConfig?.title ?? ""}
         message={alertConfig?.message}
         buttons={alertConfig?.buttons}
-        onRequestClose={() => setAlertConfig(null)}
+        onRequestClose={() => {
+          setAlertConfig(null);
+          if (deviceGoneRef.current) router.replace("/home");
+        }}
       />
     </SafeAreaView>
   );
