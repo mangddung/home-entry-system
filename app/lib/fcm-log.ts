@@ -5,12 +5,13 @@ export type FcmNotificationItem = {
   title?: string;
   body?: string;
   timestamp: string;
+  feedback_id?: string; // 해제 타이밍 피드백 대상 알림 (lib/proximity.ts)
 };
 
-export const appendFcmNotification = async (title?: string, body?: string) => {
+export const appendFcmNotification = async (title?: string, body?: string, feedback_id?: string) => {
   const raw = await AsyncStorage.getItem(FCM_NOTIFICATIONS_KEY);
   const list: FcmNotificationItem[] = raw ? JSON.parse(raw) : [];
-  list.unshift({ title, body, timestamp: new Date().toISOString() });
+  list.unshift({ title, body, timestamp: new Date().toISOString(), feedback_id });
   await AsyncStorage.setItem(FCM_NOTIFICATIONS_KEY, JSON.stringify(list.slice(0, 50)));
 };
 

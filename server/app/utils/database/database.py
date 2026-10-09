@@ -40,9 +40,11 @@ def init_db():
             conn.commit()
 
     # 기기 설정 요청자 점유 (setup_token 발급 시 기록, 설정 완료/리셋 시 행 재생성으로 초기화)
+    # rssi_threshold: 근접 해제 기기 임계값 (NULL이면 앱이 첫 발견 즉시 연결)
     for col, ddl in (
         ("setup_user_uuid",    "ALTER TABLE device_management ADD COLUMN setup_user_uuid VARCHAR(50)"),
         ("setup_requested_at", "ALTER TABLE device_management ADD COLUMN setup_requested_at DATETIME"),
+        ("rssi_threshold",     "ALTER TABLE device_management ADD COLUMN rssi_threshold INTEGER"),
     ):
         if col not in existing_device_cols:
             with engine.connect() as conn:

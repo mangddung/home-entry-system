@@ -107,6 +107,7 @@ def get_user_devices():
                     "longitude":   m.device.location.longitude,
                 } if m.device.location else None,
                 "last_ping_at": m.device.last_ping_at.isoformat() + "Z" if m.device.last_ping_at else None,
+                "rssi_threshold": m.device.rssi_threshold,
             }
             for m in mappings
         ]
@@ -259,6 +260,47 @@ def get_device_location():
 
 
         return jsonify({"status": "success", "message": "success"}), 200
+
+# POST /client/device-rssi-threshold
+# 근접 해제 기기 임계값(dBm). master만 변경. null이면 해제(첫 발견 즉시 연결로 복귀).
+RSSI_THRESHOLD_MIN, RSSI_THRESHOLD_MAX = -100, -20
+
+@client_bp.route("/device-rssi-threshold", methods=["POST"])
+def update_rssi_threshold():
+    payload, err = verify_access_token(request.headers.get("Authorization", ""))
+    if err:
+        return jsonify({"status": "error", "message": "invalid token"}), 401
+
+    user_uuid = payload["sub"]
+
+    data = request.get_json(silent=True) or {}
+    device_uuid = (data.get("device_uuid") or "").strip()
+    threshold = data.get("rssi_threshold")
+    # bool은 int의 하위 타입이라 따로 거른다
+    if not device_uuid or (threshold is not None and (
+        isinstance(threshold, bool) or not isinstance(threshold, int)
+        or not RSSI_THRESHOLD_MIN <= threshold <= RSSI_THRESHOLD_MAX
+    )):
+        return jsonify({"status": "error", "message": "invalid payload"}), 400
+
+    with _db.Session() as session:
+        master = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid, device_uuid=device_uuid, role="master").first()
+        if not master:
+            return jsonify({"status": "error", "message": "forbidden"}), 403
+        device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()
+        if not device:
+            return jsonify({"status": "error", "message": "invalid payload"}), 400
+
+        device.rssi_threshold = threshold
+        nickname = master.device_nickname or device_uuid[:8]
+        session.commit()
+
+    log_activity("device_rssi_threshold_updated", user_uuid=user_uuid, device_uuid=device_uuid,
+                 detail={"rssi_threshold": threshold})
+    # 자동 해제를 쓰는 마스터·멤버 앱이 새 기준을 받아가도록 refresh_devices를 싣는다
+    send_to_device_role(device_uuid, ["master", "member"], f"{nickname} 기기 알림",
+                        "근접 해제 기준이 변경되었습니다", data={"type": "refresh_devices"})
+    return jsonify({"status": "success", "message": "success"}), 200
 
 # DELETE /client/device
 @client_bp.route("/device", methods=["DELETE"])

@@ -8,6 +8,7 @@ import {
   USER_ACCESS_TOKEN_KEY,
   USER_DEVICES_KEY,
 } from "../constants";
+import { pruneCalibrations } from "../proximity";
 import { getTokenSecure, setTokenSecure } from "../token-storage";
 import type { DeviceStatus, IoTDevice, SetupUuids } from "../types";
 import { getApiErrorMessage } from "./errors";
@@ -25,7 +26,10 @@ export const fetchDevices = async () => {
     const devices: IoTDevice[] = response.data.data;
     // UUID 인덱스만 USER_DEVICES_KEY에 저장 (2KB 제한 대응)
     const uuids = devices.map((d) => d.device_uuid);
+    const prevIndex = await getTokenSecure(USER_DEVICES_KEY);
     await setTokenSecure(USER_DEVICES_KEY, JSON.stringify(uuids));
+    // 기기 구성이 바뀐 경우에만 빠진 기기의 근접 보정값을 지운다(로그아웃은 인덱스만 비우므로 보정값 유지)
+    if (prevIndex !== JSON.stringify(uuids)) await pruneCalibrations(uuids);
     // 기기별 전체 데이터를 개별 키에 저장
     await Promise.all(
       devices.map((d) => setTokenSecure(`${DEVICE_KEY_PREFIX}${d.device_uuid}`, JSON.stringify(d)))
@@ -236,6 +240,28 @@ export const updateDeviceName = async (device_uuid: String, device_nickname: Str
     const response = await axios.post(
       `${BACKEND_URL}/client/device-name`,
       { device_uuid: device_uuid, device_nickname: device_nickname },
+      { headers: { Authorization: `Bearer ${access_token}` }, timeout: 5000 },
+    );
+    return { type: "success", message: response.data.message };
+  } catch (error) {
+    if (axios.isAxiosError(error) && !error.response) {
+      return { type: "no_response", message: "서버에 연결할 수 없습니다." };
+    }
+    return { type: "forbidden", message: getApiErrorMessage(error) };
+  }
+};
+
+// POST /client/device-rssi-threshold (master만). null이면 해제.
+export const updateRssiThreshold = async (device_uuid: string, rssi_threshold: number | null) => {
+  const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
+  if (!access_token) {
+    return { type: "forbidden", message: "access token이 없습니다." };
+  }
+
+  try {
+    const response = await axios.post(
+      `${BACKEND_URL}/client/device-rssi-threshold`,
+      { device_uuid, rssi_threshold },
       { headers: { Authorization: `Bearer ${access_token}` }, timeout: 5000 },
     );
     return { type: "success", message: response.data.message };

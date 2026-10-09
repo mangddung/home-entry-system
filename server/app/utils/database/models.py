@@ -92,6 +92,8 @@ class DeviceManagement(Base):
     ble_manufacturer_uuid = Column(String(255), nullable=True, unique=True)
     last_ping_at          = Column(DateTime, nullable=True)
     current_jti           = Column(String(36), nullable=True)
+    # 근접 해제 기기 임계값(dBm, 마스터가 보정). NULL이면 앱이 첫 발견 즉시 연결(기존 동작).
+    rssi_threshold        = Column(Integer, nullable=True)
 
     settings        = relationship("Settings", back_populates="device", cascade="all, delete-orphan")
     location        = relationship("DeviceLocation", back_populates="device", cascade="all, delete-orphan", uselist=False)

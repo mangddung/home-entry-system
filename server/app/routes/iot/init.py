@@ -231,7 +231,9 @@ def iot_validate_token():
                          detail={"display_name": user_display})
 
             # 사용 횟수가 늘었으므로 인증한 본인 앱의 토큰 캐시를 갱신시킨다
-            send_to_user(user_uuid, f"{user_nickname} 기기 알림", "인증 성공", data={"type": "refresh_devices"})
+            # event/device_uuid: 앱이 자기 자동 트리거와 짝지어 해제 타이밍 피드백 알림을 띄운다
+            send_to_user(user_uuid, f"{user_nickname} 기기 알림", "인증 성공",
+                         data={"type": "refresh_devices", "event": "unlock_success", "device_uuid": device_uuid})
             if not is_master and master_uuid:
                 send_to_user(master_uuid, f"{master_nickname} 기기 알림", f"{user_display} {role_label}가 인증 성공")
 

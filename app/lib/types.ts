@@ -25,6 +25,8 @@ export type IoTDevice = {
     longitude: number;
   } | null;
   last_ping_at: Date;
+  // 근접 해제 기기 임계값(dBm, 마스터 보정). null이면 첫 발견 즉시 연결. 이전 버전 캐시에는 없을 수 있다
+  rssi_threshold?: number | null;
 };
 
 export type DebugLog = {
@@ -50,6 +52,7 @@ export type DeviceStatus = {
   device_uuid: string;
   isInside: boolean;
   bleSuccess: boolean;
+  enteredAt?: number; // 지오펜스 진입 시각 ms (수동 인증을 "늦음" 피드백으로 볼지 판단)
 };
 
 export type MemberInfo = {

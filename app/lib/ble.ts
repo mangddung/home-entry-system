@@ -1,6 +1,7 @@
 import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
 import { DEBUG_LOG, DEVICE_STATUS_KEY, USER_SECRET_KEY } from "@/lib/constants";
 import { encryptAES, sha256 } from "@/lib/crypto";
+import { createGate } from "@/lib/proximity-rules";
 import { appendSystemLog, formatTimestamp } from "@/lib/system-log";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Buffer } from "buffer";
@@ -42,7 +43,43 @@ export const stopScan = () => {
   }
 };
 
-export type ScanOptions = { scanMode?: ScanMode; timeoutMs?: number };
+// 디버그 탭 RSSI 측정용: 주어진 서비스 UUID들의 광고를 연결 없이 계속 받는다.
+// 다른 스캔(백그라운드 트래킹 등) 중이면 null. 반환된 함수로 중지한다.
+export const startRssiScan = async (
+  serviceUuids: string[],
+  onAdvertise: (serviceUuid: string, rssi: number) => void,
+): Promise<(() => void) | null> => {
+  if (isScanning) return null;
+  if (!(await requestBluetoothPermission())) return null;
+  await waitForPoweredOn(manager);
+
+  const targets = new Set(serviceUuids.map((u) => u.toLowerCase()));
+  const stop = () => {
+    manager.stopDeviceScan();
+    isScanning = false;
+  };
+  isScanning = true;
+  // Android는 LowLatency에서 광고마다 콜백, iOS는 allowDuplicates가 있어야 반복 수신된다
+  manager.startDeviceScan([...targets], { scanMode: ScanMode.LowLatency, allowDuplicates: true }, (error, device) => {
+    if (error) {
+      logDebug({ event_name, log_type: "WARNING", message: `RSSI 스캔 에러: ${error.message}` });
+      stop();
+      return;
+    }
+    if (!device || device.rssi == null) return;
+    const matched = device.serviceUUIDs?.map((u) => u.toLowerCase()).find((u) => targets.has(u));
+    if (matched) onAdvertise(matched, device.rssi);
+  });
+  return stop;
+};
+
+export type ScanOptions = {
+  scanMode?: ScanMode;
+  timeoutMs?: number;
+  // 근접 해제: 광고 RSSI 중앙값이 문턱을 연속으로 넘을 때만 기기를 돌려준다(못 넘으면 빈 배열).
+  // onTrigger는 넘은 순간의 중앙값으로 한 번 불린다.
+  gate?: { threshold: number; onTrigger?: (rssi: number) => void };
+};
 
 export const scanDevice = async (
   ioTDevice: IoTDevice,
@@ -87,6 +124,8 @@ export const scanDevice = async (
 
   isScanning = true;
   const found = new Map<string, Device>();
+  const gate = opts?.gate ? createGate(opts.gate.threshold) : null;
+  let gated = false;
 
   return new Promise<Device[]>((resolve) => {
     const scanTimeout = setTimeout(() => {
@@ -95,12 +134,14 @@ export const scanDevice = async (
       logDebug({
         event_name: event_name,
         log_type: "DEBUG",
-        message: `스캔 완료: ${found.size}개 발견`,
+        message: gate ? `근접 문턱 미달로 스캔 종료 (${found.size}개 발견)` : `스캔 완료: ${found.size}개 발견`,
       });
-      resolve([...found.values()]);
+      // 게이트 사용 시 발견만 하고 문턱을 못 넘었으면 연결하지 않는다
+      resolve(gate ? [] : [...found.values()]);
     }, opts?.timeoutMs ?? 30000);
 
-    manager.startDeviceScan([bleUuids.ble_service_uuid], { scanMode: opts?.scanMode ?? ScanMode.LowLatency }, async (error, device) => {
+    // 게이트는 같은 기기의 광고를 반복해서 받아야 한다(iOS는 allowDuplicates 필요, Android는 LowLatency에서 매번 콜백)
+    manager.startDeviceScan([bleUuids.ble_service_uuid], { scanMode: opts?.scanMode ?? ScanMode.LowLatency, allowDuplicates: !!gate }, async (error, device) => {
       if (error) {
         clearTimeout(scanTimeout);
         manager.stopDeviceScan();
@@ -111,6 +152,20 @@ export const scanDevice = async (
           message: `스캔 에러: ${error.message}`,
         });
         resolve([]);
+        return;
+      }
+      if (device && gate) {
+        found.set(device.id, device);
+        if (gated || device.rssi == null) return;
+        const hit = gate(device.rssi);
+        if (hit == null) return;
+        gated = true;
+        clearTimeout(scanTimeout);
+        manager.stopDeviceScan();
+        isScanning = false;
+        logDebug({ event_name, log_type: "DEBUG", message: `근접 트리거: RSSI ${hit} ≥ ${opts!.gate!.threshold}` });
+        opts!.gate!.onTrigger?.(hit);
+        resolve([device]);
         return;
       }
       if (device) {

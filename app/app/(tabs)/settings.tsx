@@ -9,7 +9,8 @@ import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { AlertButton, CustomAlert } from "@/components/custom-alert";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { Provider } from "@ant-design/react-native";
+import { Provider, Switch } from "@ant-design/react-native";
+import { isFeedbackEnabled, setFeedbackEnabled } from "@/lib/proximity";
 import { getThemePref, setThemePref, type ThemePref } from "@/lib/theme-pref";
 import { router } from "expo-router";
 import { useEffect, useState } from "react";
@@ -68,10 +69,12 @@ export default function SettingsScreen() {
   const cardBg = isDark ? "#1e2022" : "#f3f4f6";
   const dividerColor = isDark ? "#2a2d2e" : "#e5e7eb";
 
+  const [feedbackOn, setFeedbackOn] = useState<boolean | null>(null);
   const [themePref, setThemePrefState] = useState<ThemePref | null>(null);
 
   useEffect(() => {
     checkBlePermission().then(setBleGranted);
+    isFeedbackEnabled().then(setFeedbackOn);
     getThemePref().then(setThemePrefState);
   }, []);
 
@@ -186,6 +189,35 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        {/* 자동 해제 섹션 */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: colors.icon }]}>자동 해제</Text>
+          <View style={[styles.card, { backgroundColor: cardBg }]}>
+            <SettingRow
+              icon="message-question-outline"
+              iconColor="#fff"
+              iconBg="#16a34a"
+              label="해제 타이밍 피드백 알림"
+              textColor={colors.text}
+              chevron={false}
+              rightContent={
+                feedbackOn !== null ? (
+                  <Switch
+                    checked={feedbackOn}
+                    onChange={(on) => {
+                      setFeedbackOn(on);
+                      void setFeedbackEnabled(on);
+                    }}
+                  />
+                ) : null
+              }
+            />
+          </View>
+          <Text style={[styles.sectionHint, { color: colors.icon }]}>
+            자동으로 문이 열린 뒤 일찍/적당/늦게를 물어 기기별 열림 거리를 조절합니다. 끄면 피드백과 자동 조절을 모두 하지 않습니다.
+          </Text>
+        </View>
+
         {/* 개발자 도구 섹션 */}
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: colors.icon }]}>개발자 도구</Text>
@@ -253,6 +285,11 @@ const styles = StyleSheet.create({
   },
   section: {
     gap: 10,
+  },
+  sectionHint: {
+    fontSize: 12,
+    lineHeight: 17,
+    paddingHorizontal: 4,
   },
   sectionTitle: {
     fontSize: 12,

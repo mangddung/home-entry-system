@@ -4,6 +4,7 @@ import { useColorScheme } from "@/hooks/use-color-scheme";
 import { loadDevices } from "@/lib/api/devices";
 import { userTokenExchange } from "@/lib/ble";
 import { GEOFENCE_RADIUS_M, SELECTED_DEVICE_KEY } from "@/lib/constants";
+import { noteManualUnlock } from "@/lib/proximity";
 import { isTokenUsableNow } from "@/lib/schedule";
 import { readLogs } from "@/lib/system-log";
 import { setTokenSecure } from "@/lib/token-storage";
@@ -311,6 +312,8 @@ export default function MapScreen() {
     }
     unlockingRef.current = true;
     setUnlocking(true);
+    // 자동 해제를 기다리다 직접 연 경우면 "늦음" 피드백으로 반영
+    void noteManualUnlock(device);
     try {
       const success = await userTokenExchange(device);
       if (success) {

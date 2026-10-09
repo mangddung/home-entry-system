@@ -1,5 +1,6 @@
 import { setBleScanning } from "@/lib/background-tracking";
-import { userTokenExchange } from "@/lib/ble";
+import { scanDevice, userTokenExchange } from "@/lib/ble";
+import { getThresholdFor, recordTrigger } from "@/lib/proximity";
 import { ScanMode } from "react-native-ble-plx";
 import { loadDevices } from "@/lib/api/devices";
 import {
@@ -22,6 +23,8 @@ const BLE_BURST_MS = 2 * 60 * 1000;
 // TODO: 추후 사용자 설정으로 변경 가능하게 추가할 예정
 const BLE_MAX_TRACKING_MS = 60 * 60 * 1000;
 const BLE_RETRY_INTERVAL_MS = 5000;
+// 절전 스캔 중 기기가 보이면 이 시간 동안 빠른 스캔으로 RSSI 상승을 추적한다
+const BLE_PROMOTE_MS = 45 * 1000;
 
 const bleInProgress = new Set<string>();
 const bleTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -141,17 +144,33 @@ const startBleTracking = async (initialDevice: IoTDevice) => {
         lastBurst = burst;
         void setBleScanning(uuid, burst ? "fast" : "saving");
       }
+      // 근접 문턱(내 보정 > 기기 임계값). 없으면 기존처럼 첫 발견 즉시 연결.
+      const threshold = await getThresholdFor(device);
+      const gate =
+        threshold == null
+          ? undefined
+          : { threshold, onTrigger: (rssi: number) => void recordTrigger(uuid, rssi, threshold) };
+      // 배터리를 더 줄여야 하면 ScanMode.LowPower로 내린다.
+      // Balanced는 duty 25%(1024ms/4096ms), LowPower는 10%(512ms/5120ms)로 최악 발견 지연은 4초 -> 5초 차이뿐이다.
+      // 펌웨어 광고 주기가 30~60ms라 LowPower 스캔 창에도 충분히 걸리지만,
+      // 일부 제조사가 LowPower를 더 공격적으로 스로틀하므로 실기기 확인 후 내릴 것.
+      const saving = { scanMode: ScanMode.Balanced, timeoutMs: 60000 };
       try {
-        await userTokenExchange(
-          device,
-          burst
-            ? { scanMode: ScanMode.LowLatency, timeoutMs: 30000 }
-            // 배터리를 더 줄여야 하면 ScanMode.LowPower로 내린다.
-            // Balanced는 duty 25%(1024ms/4096ms), LowPower는 10%(512ms/5120ms)로 최악 발견 지연은 4초 -> 5초 차이뿐이다.
-            // 펌웨어 광고 주기가 30~60ms라 LowPower 스캔 창에도 충분히 걸리지만,
-            // 일부 제조사가 LowPower를 더 공격적으로 스로틀하므로 실기기 확인 후 내릴 것.
-            : { scanMode: ScanMode.Balanced, timeoutMs: 60000 },
-        );
+        if (burst) {
+          await userTokenExchange(device, { scanMode: ScanMode.LowLatency, timeoutMs: 30000, gate });
+        } else if (!gate) {
+          await userTokenExchange(device, saving);
+        } else {
+          // 절전 스캔은 샘플이 ~4초에 한 묶음이라 RSSI 판정이 늦다 → 발견만 하고,
+          // 잡히면 빠른 스캔으로 재승격해 다가오는 RSSI를 추적한다(못 넘으면 다음 회차에 다시 절전).
+          const seen = await scanDevice(device, undefined, saving);
+          if (seen.length > 0 && !bleAbort.has(uuid)) {
+            appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble promote to fast (device seen)" });
+            void setBleScanning(uuid, "fast");
+            lastBurst = null; // 다음 회차에 절전 표시로 되돌린다
+            await userTokenExchange(device, { scanMode: ScanMode.LowLatency, timeoutMs: BLE_PROMOTE_MS, gate });
+          }
+        }
       } catch {
         // 무시하고 재시도
       }
@@ -204,7 +223,10 @@ TaskManager.defineTask(BG_GEOFENCE_TASK, async ({ data, error }) => {
 
   if (eventType === Location.LocationGeofencingEventType.Enter) {
     appendSystemLog({ event_name: uuid, log_type: "INFO", message: "geofence enter" });
-    if (status) status.isInside = true;
+    if (status) {
+      status.isInside = true;
+      status.enteredAt = Date.now();
+    }
     await setTokenSecure(DEVICE_STATUS_KEY, JSON.stringify(parsedDeviceStatus));
 
     if (status?.bleSuccess) return; // 이미 열려 있으면 스킵

@@ -5,6 +5,8 @@ import { fetchDevices, fetchUnconfiguredDevices, loadDevices } from "@/lib/api/d
 import { sweepOrphanBonds } from "@/lib/bond";
 import { updateGeoFence } from "@/lib/background-tracking";
 import { loadFcmNotifications, getFcmLastReadAt, setFcmLastReadAt, type FcmNotificationItem } from "@/lib/fcm-log";
+import { consumePendingFeedbackNav, loadFeedback } from "@/lib/proximity";
+import { ANSWER_LABEL, type FeedbackRecord, feedbackStatus } from "@/lib/proximity-rules";
 import {
   DEVICES_REFRESHED_EVENT,
   IS_ONLINE_KEY,
@@ -75,8 +77,14 @@ export default function HomeScreen() {
   const [notifModalVisible, setNotifModalVisible] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [lastReadAt, setLastReadAt] = useState<Date>(new Date(0));
+  // 해제 타이밍 피드백 레코드(id → 레코드). 알림 목록 배지와 종 아이콘 배지에 쓴다
+  const [feedbacks, setFeedbacks] = useState<Record<string, FeedbackRecord>>({});
 
   const isFocused = useIsFocused();
+
+  const reloadFeedbacks = async () => {
+    setFeedbacks(Object.fromEntries((await loadFeedback()).map((r) => [r.id, r])));
+  };
 
   useEffect(() => {
     if (!isFocused) return;
@@ -110,6 +118,10 @@ export default function HomeScreen() {
       setNotifications(notifs);
       setLastReadAt(readAt);
       setUnreadCount(notifs.filter(n => new Date(n.timestamp) > readAt).length);
+      await reloadFeedbacks();
+      // 앱이 꺼진 상태에서 피드백 알림 본문을 눌러 켜진 경우
+      const feedbackNavId = await consumePendingFeedbackNav();
+      if (feedbackNavId) router.push({ pathname: "/feedback", params: { id: feedbackNavId } });
       const isOnlineNow = result.type === "success";
       if (isOnlineNow) {
         await refreshDevices();
@@ -134,6 +146,10 @@ export default function HomeScreen() {
     };
   }, [isFocused]);
 
+  // 읽지 않은 알림이 없어도 피드백 안 한 알림이 남아 있으면 종 배지를 띄운다
+  const pendingFeedbackCount = Object.values(feedbacks).filter((r) => feedbackStatus(r) === "pending").length;
+  const bellCount = unreadCount || pendingFeedbackCount;
+
   const cardBg = isDark ? "#1e2022" : "#f3f4f6";
   const dividerColor = isDark ? "#2a2d2e" : "#e5e7eb";
 
@@ -151,14 +167,15 @@ export default function HomeScreen() {
             <TouchableOpacity
               onPress={async () => {
                 setNotifications(await loadFcmNotifications());
+                await reloadFeedbacks();
                 setNotifModalVisible(true);
               }}
               style={styles.bellButton}
             >
               <MaterialCommunityIcons name="bell-outline" size={22} color={colors.text} />
-              {unreadCount > 0 && (
+              {bellCount > 0 && (
                 <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>{unreadCount > 9 ? "9+" : unreadCount}</Text>
+                  <Text style={styles.bellBadgeText}>{bellCount > 9 ? "9+" : bellCount}</Text>
                 </View>
               )}
             </TouchableOpacity>
@@ -327,15 +344,38 @@ export default function HomeScreen() {
                 ItemSeparatorComponent={() => <View style={[styles.divider, { backgroundColor: dividerColor }]} />}
                 renderItem={({ item }) => {
                   const isNew = new Date(item.timestamp) > lastReadAt;
+                  const fb = item.feedback_id ? feedbacks[item.feedback_id] : undefined;
+                  const fbStatus = fb ? feedbackStatus(fb) : null;
+                  const fbBadge =
+                    fbStatus === "pending"
+                      ? { text: "피드백 필요", color: "#f59e0b" }
+                      : fbStatus === "done" && fb?.answer
+                        ? { text: `피드백 완료 · ${ANSWER_LABEL[fb.answer]}`, color: "#16a34a" }
+                        : fbStatus === "expired"
+                          ? { text: "피드백 만료", color: "#9BA1A6" }
+                          : null;
                   return (
-                    <View style={styles.notifItem}>
+                    <TouchableOpacity
+                      style={styles.notifItem}
+                      disabled={!fb}
+                      activeOpacity={0.7}
+                      onPress={() => {
+                        setNotifModalVisible(false);
+                        router.push({ pathname: "/feedback", params: { id: fb!.id } });
+                      }}
+                    >
                       {isNew && <View style={styles.notifNewDot} />}
                       <View style={{ flex: 1, gap: 2 }}>
                         {item.title && <Text style={[styles.notifTitle, { color: colors.text }]}>{item.title}</Text>}
                         {item.body && <Text style={[styles.notifBody, { color: colors.icon }]}>{item.body}</Text>}
                         <Text style={styles.notifTime}>{new Date(item.timestamp).toLocaleString()}</Text>
+                        {fbBadge && (
+                          <Text style={[styles.notifFeedback, { color: fbBadge.color, borderColor: fbBadge.color }]}>
+                            {fbBadge.text}
+                          </Text>
+                        )}
                       </View>
-                    </View>
+                    </TouchableOpacity>
                   );
                 }}
               />
@@ -533,6 +573,17 @@ const styles = StyleSheet.create({
   },
   notifBody: {
     fontSize: 12,
+  },
+  notifFeedback: {
+    alignSelf: "flex-start",
+    marginTop: 4,
+    fontSize: 11,
+    fontWeight: "600",
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    overflow: "hidden",
   },
   notifTime: {
     fontSize: 11,

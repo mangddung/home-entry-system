@@ -1,3 +1,4 @@
+import { CustomAlert } from "@/components/custom-alert";
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { fetchDeviceLocation, loadDevices } from "@/lib/api/devices";
@@ -251,13 +252,16 @@ export default function LocationSetupScreen() {
   const [pendingLocation, setPendingLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [nicknameVisible, setNicknameVisible] = useState(false);
   const [nickname, setNickname] = useState("");
+  // 위치 등록(=기기 등록 완료) 후 근접 해제 보정 권유
+  const [calibrateFor, setCalibrateFor] = useState<string | null>(null);
+  const calibrateChosenRef = useRef(false); // CustomAlert는 버튼 후 onRequestClose도 부르므로 이동은 거기서 한 번만
 
   const onConfirm = async (_lat: number, _lng: number, _nickname: string) => {
     if (!targetDevice) return;
     const result = await fetchDeviceLocation(targetDevice.device_uuid, _lat, _lng, _nickname);
     if (result?.type === "success") {
       Toast.info("위치 등록 성공");
-      router.replace("/home");
+      setCalibrateFor(targetDevice.device_uuid);
     } else {
       Toast.fail(result?.message ?? "위치 등록에 실패했습니다");
     }
@@ -430,6 +434,24 @@ export default function LocationSetupScreen() {
         </Pressable>
         </KeyboardAvoidingView>
       </Modal>
+      <CustomAlert
+        visible={!!calibrateFor}
+        title="열림 거리를 보정하시겠습니까?"
+        message="문 앞에서 폰을 주머니에 넣고 약 10초 측정하면, 문 앞에 도착할 때 맞춰 열리도록 조절합니다. 나중에 기기 상세에서도 할 수 있습니다."
+        buttons={[
+          { text: "나중에", style: "cancel" },
+          { text: "보정하기", onPress: () => { calibrateChosenRef.current = true; } },
+        ]}
+        onRequestClose={() => {
+          const id = calibrateFor;
+          setCalibrateFor(null);
+          if (calibrateChosenRef.current && id) {
+            router.replace({ pathname: "/device/rssi-calibrate", params: { device_uuid: id, from: "setup" } });
+          } else {
+            router.replace("/home");
+          }
+        }}
+      />
     </SafeAreaView>
   );
 }

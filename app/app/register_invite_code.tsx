@@ -7,7 +7,7 @@ import { extractInviteCode } from "@/lib/api/members";
 import { MAX_DEVICES_PER_USER } from "@/lib/constants";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -23,6 +23,10 @@ export default function RegisterInviteCodeScreen() {
   const [accepting, setAccepting] = useState(false);
   const [nicknameModalVisible, setNicknameModalVisible] = useState(false);
   const [registeredDeviceUuid, setRegisteredDeviceUuid] = useState<string | null>(null);
+  const [registeredRole, setRegisteredRole] = useState<string | null>(null);
+  // 멤버 가입 후 근접 해제 보정 권유 (게스트는 수동 전용이라 묻지 않음)
+  const [calibratePrompt, setCalibratePrompt] = useState(false);
+  const calibrateChosenRef = useRef(false); // CustomAlert는 버튼 후 onRequestClose도 부르므로 이동은 거기서 한 번만
   const [nickname, setNickname] = useState("");
 
   const showAlert = (title: string, message?: string, onClose?: () => void) =>
@@ -60,6 +64,7 @@ export default function RegisterInviteCodeScreen() {
     const result = await fetchRegisterInviteCode(inviteCode.trim());
     setAccepting(false);
     if (result.type === "success") {
+      setRegisteredRole(preview?.role ?? null);
       setPreview(null);
       if (result.device_uuid) {
         setRegisteredDeviceUuid(result.device_uuid);
@@ -83,7 +88,8 @@ export default function RegisterInviteCodeScreen() {
       await updateDeviceName(registeredDeviceUuid, nickname.trim());
     }
     setNicknameModalVisible(false);
-    router.back();
+    if (registeredRole === "member" && registeredDeviceUuid) setCalibratePrompt(true);
+    else router.back();
   };
 
   return (
@@ -234,6 +240,23 @@ export default function RegisterInviteCodeScreen() {
         </Pressable>
         </KeyboardAvoidingView>
       </Modal>
+      <CustomAlert
+        visible={calibratePrompt}
+        title="열림 거리를 보정하시겠습니까?"
+        message="문 앞에서 폰을 주머니에 넣고 약 10초 측정하면, 문 앞에 도착할 때 맞춰 열리도록 조절합니다. 나중에 기기 상세에서도 할 수 있습니다."
+        buttons={[
+          { text: "나중에", style: "cancel" },
+          { text: "보정하기", onPress: () => { calibrateChosenRef.current = true; } },
+        ]}
+        onRequestClose={() => {
+          setCalibratePrompt(false);
+          if (calibrateChosenRef.current && registeredDeviceUuid) {
+            router.replace({ pathname: "/device/rssi-calibrate", params: { device_uuid: registeredDeviceUuid, from: "setup" } });
+          } else {
+            router.back();
+          }
+        }}
+      />
     </SafeAreaView>
   );
 }

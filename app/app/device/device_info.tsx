@@ -5,6 +5,7 @@ import { deleteDevice, deleteMemberShip, fetchDevices, loadDevices, updateDevice
 import { unbondDevice } from "@/lib/bond";
 import { fetchDeviceLogs, type DeviceLog } from "@/lib/api/logs";
 import { userTokenExchange } from "@/lib/ble";
+import { noteManualUnlock } from "@/lib/proximity";
 import {
   createGuestToken,
   buildInviteUrl,
@@ -422,6 +423,8 @@ export default function DeviceInfoView() {
       return;
     }
     setIsAuthenticating(true);
+    // 자동 해제를 기다리다 직접 연 경우면 "늦음" 피드백으로 반영
+    void noteManualUnlock(device);
     try {
       const success = await userTokenExchange(device);
       if (success) {
@@ -1338,6 +1341,26 @@ export default function DeviceInfoView() {
             </View>
           )}
         </View>
+
+        {/* 근접 해제 보정 (게스트는 수동 전용이라 제외) */}
+        {device.role !== "guest" && (
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>근접 해제</Text>
+            <TouchableOpacity
+              style={[styles.proximityRow, { backgroundColor: cardBg, borderColor: cardBorder }]}
+              onPress={() => router.push({ pathname: "/device/rssi-calibrate", params: { device_uuid: device.device_uuid } })}
+            >
+              <MaterialCommunityIcons name="signal-distance-variant" size={20} color="#16a34a" />
+              <View style={{ flex: 1, gap: 2 }}>
+                <Text style={[styles.proximityTitle, { color: colors.text }]}>열림 거리 보정</Text>
+                <Text style={[styles.proximitySub, { color: colors.tabIconDefault }]}>
+                  기기 기준 {device.rssi_threshold != null ? `${device.rssi_threshold} dBm` : "미설정 (발견 즉시 열림)"}
+                </Text>
+              </View>
+              <MaterialCommunityIcons name="chevron-right" size={18} color={colors.tabIconDefault} />
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* 내 토큰 섹션 (마스터 제외) */}
         {device.role !== "master" && (
@@ -2416,6 +2439,21 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "700",
     letterSpacing: -0.2,
+  },
+  proximityRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  proximityTitle: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  proximitySub: {
+    fontSize: 12,
   },
   sectionActions: {
     flexDirection: "row",
