@@ -17,7 +17,7 @@ import {
   fetchInviteCode,
   fetchMember,
 } from "@/lib/api/members";
-import { DEVICES_REFRESHED_EVENT, GEOFENCE_RADIUS_M, SELECTED_DEVICE_KEY, USER_UUID_KEY } from "@/lib/constants";
+import { DEVICES_REFRESHED_EVENT, GEOFENCE_RADIUS_M, IS_ONLINE_KEY, SELECTED_DEVICE_KEY, USER_UUID_KEY } from "@/lib/constants";
 import type { ScheduleWindow } from "@/lib/schedule";
 import { getTokenSecure } from "@/lib/token-storage";
 import { MemberInfo, type IoTDevice } from "@/lib/types";
@@ -325,6 +325,7 @@ export default function DeviceInfoView() {
 
   const [myUuid, setMyUuid] = useState<string | null>(null);
   const [device, setDevice] = useState<IoTDevice | null>(null);
+  const [isOnline, setIsOnline] = useState(true);
   const [deviceMember, setDeviceMember] = useState<MemberInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
@@ -418,7 +419,7 @@ export default function DeviceInfoView() {
 
   const handleManualAuth = async () => {
     if (!device) return;
-    if (getPingColor(device.last_ping_at) === "#ef4444") {
+    if (isOnline && getPingColor(device.last_ping_at) === "#ef4444") {
       showAlert("오류", "기기가 오프라인 상태입니다.");
       return;
     }
@@ -610,15 +611,17 @@ export default function DeviceInfoView() {
 
   useEffect(() => {
     void (async () => {
-      const [selected_device, uuid] = await Promise.all([
+      const [selected_device, uuid, online] = await Promise.all([
         getTokenSecure(SELECTED_DEVICE_KEY),
         getTokenSecure(USER_UUID_KEY),
+        getTokenSecure(IS_ONLINE_KEY),
       ]);
       if (!selected_device) {
         router.push("/home");
         return;
       }
       setMyUuid(uuid);
+      setIsOnline(online === "true");
       setDevice(JSON.parse(selected_device));
       setIsLoading(false);
     })();
@@ -641,7 +644,7 @@ export default function DeviceInfoView() {
     const device_uuid = device.device_uuid;
     const role = device.role;
     const sync = async () => {
-      await fetchDevices();
+      setIsOnline((await fetchDevices()).type === "success");
       const latest = (await loadDevices()).find((d) => d.device_uuid === device_uuid);
       if (!latest) {
         if (!selfRemovingRef.current && !deviceGoneRef.current) {
@@ -1205,9 +1208,11 @@ export default function DeviceInfoView() {
       ? confirmInput === device.device_uuid.slice(0, 8)
       : leaveCountdown === 0;
 
-  const pingColor = getPingColor(device.last_ping_at);
-  const pingLabel =
-    pingColor === "#22c55e" ? "온라인" : pingColor === "#eab308" ? "대기" : "오프라인";
+  // 서버 미연결이면 캐시된 last_ping_at이 낡았으므로 기기 상태를 판단하지 않는다(수동 인증은 BLE만 쓰므로 막지 않음)
+  const pingColor = isOnline ? getPingColor(device.last_ping_at) : "#9ca3af";
+  const pingLabel = !isOnline
+    ? "확인 불가"
+    : pingColor === "#22c55e" ? "온라인" : pingColor === "#eab308" ? "대기" : "오프라인";
 
   return (
     <SafeAreaView

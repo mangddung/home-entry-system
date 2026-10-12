@@ -90,7 +90,11 @@ export default function HomeScreen() {
     if (!isFocused) return;
 
     const refreshDevices = async () => {
-      await fetchDevices();
+      // 30초 주기 갱신에서도 서버 연결 여부를 반영한다(포커스 때만 확인하면 서버가 끊겨도 온라인으로 남음)
+      const online = (await fetchDevices()).type === "success";
+      setIsOnline(online);
+      // 상세 화면이 진입 시 이 값으로 시작한다
+      await setTokenSecure(IS_ONLINE_KEY, String(online));
       setUserDevices(await loadDevices());
       await updateGeoFence();
       void sweepOrphanBonds();
@@ -215,8 +219,9 @@ export default function HomeScreen() {
             <View style={styles.list}>
               {[...userDeviecs].sort((a, b) => (ROLE_ORDER[a.role] ?? 3) - (ROLE_ORDER[b.role] ?? 3)).map((device) => {
                 const roleAccent = getRoleAccent(device.role, isDark);
-                const pingColor = getPingColor(device.last_ping_at);
-                const pingLabel = pingColor === "#22c55e" ? "온라인" : pingColor === "#eab308" ? "대기중" : "오프라인";
+                // 서버 미연결이면 캐시된 last_ping_at이 낡았으므로 기기 상태를 판단하지 않는다
+                const pingColor = isOnline ? getPingColor(device.last_ping_at) : "#9ca3af";
+                const pingLabel = !isOnline ? "확인 불가" : pingColor === "#22c55e" ? "온라인" : pingColor === "#eab308" ? "대기중" : "오프라인";
                 return (
                   <TouchableOpacity
                     key={device.device_uuid}
