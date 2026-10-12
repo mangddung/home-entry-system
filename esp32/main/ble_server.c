@@ -756,6 +756,9 @@ static int setup_gap_event_handler(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "Setup: encryption changed (status=%d)", event->enc_change.status);
             if (event->enc_change.status == 0) {
                 s_encrypted = true;
+                // 키 갱신(재암호화)으로 같은 연결에서 다시 오면 진행 중인 흐름을 유지한다
+                // (새로 만들면 기존 태스크·큐 핸들이 덮여 누수되고 두 태스크가 큐를 나눠 읽는다)
+                if (s_setup_task) break;
                 s_setup_queue = xQueueCreate(4, sizeof(setup_msg_t));
                 xTaskCreate(setup_flow_task, "setup_flow", 8192,
                             NULL, 5, &s_setup_task);
