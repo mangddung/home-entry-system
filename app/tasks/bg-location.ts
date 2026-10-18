@@ -11,6 +11,7 @@ import { isTokenAlive } from "@/lib/schedule";
 import { appendSystemLog } from "@/lib/system-log";
 import { getTokenSecure, setTokenSecure } from "@/lib/token-storage";
 import { DeviceStatus, IoTDevice } from "@/lib/types";
+import { getStillSince } from "@/modules/activity-transition";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 
@@ -25,6 +26,10 @@ const BLE_MAX_TRACKING_MS = 60 * 60 * 1000;
 const BLE_RETRY_INTERVAL_MS = 5000;
 // 절전 스캔 중 기기가 보이면 이 시간 동안 빠른 스캔으로 RSSI 상승을 추적한다
 const BLE_PROMOTE_MS = 45 * 1000;
+// N3 릴레이 완화: 반경 안에서 이 시간 넘게 정지(STILL) 중이면 자동 해제에 응답하지 않는다.
+// 카페·사무실처럼 오래 앉아 있는 동안의 중계를 막고, 엘리베이터 대기·탑승 정도는 통과시킨다.
+// 기준은 STILL ENTER 판정 시각이라 실제로는 정지 후 이 값 + 감지 지연만큼 지나야 막힌다.
+const STILL_DENY_MS = 5 * 60 * 1000;
 
 const bleInProgress = new Set<string>();
 const bleTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -126,6 +131,7 @@ const startBleTracking = async (initialDevice: IoTDevice) => {
 
   const startedAt = Date.now();
   let lastBurst: boolean | null = null;
+  let stillDenied = false;
 
   try {
     while (!bleAbort.has(uuid)) {
@@ -137,6 +143,26 @@ const startBleTracking = async (initialDevice: IoTDevice) => {
         break;
       }
       device = latest;
+
+      // 오래 정지 중이면 스캔·토큰 교환을 건너뛰고, 움직여서 STILL이 풀리면 다음 회차에 바로 재개한다.
+      // 상태를 모르면(null) 기존 동작대로 진행한다.
+      const stillSince = getStillSince();
+      const denied = stillSince != null && Date.now() - stillSince >= STILL_DENY_MS;
+      if (denied !== stillDenied) {
+        stillDenied = denied;
+        appendSystemLog({
+          event_name: uuid,
+          log_type: "INFO",
+          message: denied ? `ble paused: still over ${STILL_DENY_MS / 60000}min` : "ble resumed: moving",
+        });
+        // 쉬는 동안 알림이 "검색 중"으로 남지 않게 내리고, 재개 시 다시 그린다
+        if (denied) void setBleScanning(uuid, null);
+        lastBurst = null;
+      }
+      if (denied) {
+        await new Promise((resolve) => setTimeout(resolve, BLE_RETRY_INTERVAL_MS));
+        continue;
+      }
 
       const burst = Date.now() - startedAt < BLE_BURST_MS;
       // 스캔 모드가 바뀔 때만 알림을 갱신한다 (스캔 시작 시 1회 + burst 종료 시 1회)

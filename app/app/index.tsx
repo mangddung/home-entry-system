@@ -6,6 +6,7 @@ import { updateGeoFence } from "@/lib/background-tracking";
 import { IS_ONLINE_KEY } from "@/lib/constants";
 import { appendSystemLog } from "@/lib/system-log";
 import { checkAuthToken, setTokenSecure } from "@/lib/token-storage";
+import { startActivityTransitionLog } from "@/modules/activity-transition";
 import { Redirect } from "expo-router";
 import { useEffect, useState } from "react";
 import { ActivityIndicator, Alert, AppState, Linking, PermissionsAndroid, Platform, Text, View } from "react-native";
@@ -110,6 +111,8 @@ export default function IndexScreen() {
       // await setupBgLocation();
       // await startBgLocationTask();
       await updateGeoFence();
+      // 활동 전환 감지 등록 (N3 릴레이 완화: 오래 정지 중이면 자동 해제 거부). 재부팅 시 등록이 풀려 실행마다 호출
+      await startActivityTransitionLog();
     })();
   }, []);
 
