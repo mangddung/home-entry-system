@@ -10,7 +10,7 @@ import jwt
 
 from app.utils.database import database as _db
 from app.utils.database.models import DeviceManagement, User, UserDeviceMapping, UserToken, DeviceRefreshToken, TokenBlacklist, TokenUsage
-from app.utils.crypto_utils import decrpyt_key, decrypt_data
+from app.utils.crypto_utils import decrpyt_key, ble_mac
 from app.utils.device_utils import _generate_device_secret, _issue_device_jwt, issue_device_token_pair, check_device_limit, setup_claim_expired
 from app.utils.log_utils import log_activity
 from app.utils.fcm_utils import send_to_device_master, send_to_user
@@ -21,20 +21,16 @@ iot_bp = Blueprint("iot", __name__, url_prefix="/iot")
 
 
 
-def _is_hex_ciphertext(s: str) -> bool:
-    if not s or len(s) % 2 != 0 or len(s) < 64:
-        return False
-    try:
-        bytes.fromhex(s)
-        return True
-    except ValueError:
-        return False
+def _is_hex(s: str, length: int) -> bool:
+    return len(s) == length and all(c in "0123456789abcdefABCDEF" for c in s)
+
+
+def _is_ble_mac_hex(s: str) -> bool:
+    return _is_hex(s, 64)
 
 
 def _is_ble_otp_hex(s: str) -> bool:
-    if not s or len(s) != 6:
-        return False
-    return all(c in "0123456789abcdefABCDEF" for c in s)
+    return _is_hex(s, 16)
 
 
 def _decode_device_token(token: str) -> dict | None:
@@ -128,21 +124,23 @@ def iot_validate_token():
         return jsonify({"status": "error", "message": "Invalid token"}), 401
     device_uuid = payload.get("sub", "")
 
-    data            = request.get_json(silent=True) or {}
-    encrypted_token = (data.get("encrypted_token") or "").strip()
-    nonce           = (data.get("nonce") or "").strip()
+    # encrypted_token 필드에는 mac이 담긴다(펌웨어 요청 형식 유지를 위해 이름은 그대로 둔다)
+    data  = request.get_json(silent=True) or {}
+    mac   = (data.get("encrypted_token") or "").strip().lower()
+    nonce = (data.get("nonce") or "").strip()
 
-    if not encrypted_token or not nonce:
+    if not mac or not nonce:
         return jsonify({"status": "error", "message": "Invalid payload"}), 400
 
-    if not _is_hex_ciphertext(encrypted_token):
-        return jsonify({"status": "error", "message": "Invalid encrypted_token format"}), 400
+    if not _is_ble_mac_hex(mac):
+        return jsonify({"status": "error", "message": "Invalid mac format"}), 400
 
     if not _is_ble_otp_hex(nonce):
         return jsonify({"status": "error", "message": "Invalid nonce format"}), 400
 
-    # user_uuid를 받지 않는다. 이 기기에 매핑된 사용자의 키로 차례로 복호화해
-    # 복호화가 되고 nonce까지 일치하는 사용자를 요청자로 본다.
+    # user_uuid와 토큰 원문은 받지 않는다. 이 기기에 매핑된 사용자마다 키와 토큰으로
+    # mac을 다시 계산해 일치하는 사용자·토큰을 요청자로 본다. nonce는 ESP가 보낸 값이라
+    # 과거 mac을 재전송하거나 nonce를 바꿔치기하면 일치하지 않는다.
     with _db.Session() as session:
         candidates = (
             session.query(User)
@@ -150,24 +148,31 @@ def iot_validate_token():
             .filter(UserDeviceMapping.device_uuid == device_uuid)
             .all()
         )
+        # 만료·소진·revoke된 토큰도 후보에 넣는다: 요청자를 특정해야 거부 사유를 본인에게 알릴 수 있다
+        device_tokens = (
+            session.query(UserToken.user_uuid, UserToken.token_value)
+            .filter(UserToken.device_uuid == device_uuid)
+            .all()
+        )
 
-    user = inner = None
+    user, received_token = None, ""
     for candidate in candidates:
         try:
-            out = decrypt_data(os.environ["MASTER_KEK"], candidate.secret_key, encrypted_token)
-            if str(out["data"].get("nonce", "")).lower() != nonce.lower():
-                continue
+            key = bytes.fromhex(decrpyt_key(os.environ["MASTER_KEK"], candidate.secret_key))
         except Exception:
             continue
-        user, inner = candidate, out["data"]
-        break
+        # "" = 토큰 없이 보낸 경우(mac = HMAC(key, nonce))
+        values = [""] + [v for u, v in device_tokens if u == candidate.user_uuid]
+        received_token = next((v for v in values if hmac.compare_digest(ble_mac(key, nonce, v), mac)), None)
+        if received_token is not None:
+            user = candidate
+            break
 
     if user is None:
-        return jsonify({"status": "error", "message": "Invalid ciphertext or key"}), 400
+        return jsonify({"status": "error", "message": "Invalid mac or key"}), 400
     user_uuid = user.user_uuid
 
     # 토큰 검증
-    received_token = inner.get("auth_token", "")
     now = datetime.now(timezone.utc)
 
     with _db.Session() as session:

@@ -23,7 +23,8 @@ _db.init_db()
 import jwt
 from flask import Flask
 from app.utils.database.models import DeviceManagement, UserDeviceMapping, User, UserToken
-from app.utils.crypto_utils import encrypt_data
+import hashlib, hmac
+from app.utils.crypto_utils import ble_mac
 from app.utils.device_utils import SETUP_CLAIM_TTL
 from app.routes.iot import init as iot_init
 from app.routes.client import devices as client_devices
@@ -48,6 +49,7 @@ with _db.Session() as s:
     s.add(UserDeviceMapping(user_uuid=A, device_uuid=DEV, display_name="a", role="master"))
     s.add(UserDeviceMapping(user_uuid=B, device_uuid=DEV, display_name="b", role="member"))
     s.add(UserToken(token_value="tok-b", user_uuid=B, device_uuid=DEV, expired_at=now + datetime.timedelta(hours=1)))
+    s.add(UserToken(token_value="tok-b-old", user_uuid=B, device_uuid=DEV, expired_at=now - datetime.timedelta(hours=1)))
     s.commit()
 
 app = Flask(__name__)
@@ -61,34 +63,61 @@ dev_hdr = {"Authorization": "Bearer " + jwt.encode(
     os.environ["JWT_SECRET"], algorithm="HS256")}
 
 
-def cipher(key, nonce, token):
-    return encrypt_data({"nonce": nonce, "timestamp": "t", "auth_token": token}, key)
+def mac(key, nonce, token):
+    # 서버 구현(ble_mac)과 독립적으로 계산해 형식을 교차 확인한다
+    return hmac.new(key, (nonce + token).encode(), hashlib.sha256).hexdigest()
 
 
-# ── normal: user_uuid 없이 복호화 성공한 사용자(B)가 식별된다 ──
-r = c.post("/iot/validate_token", headers=dev_hdr,
-           json={"encrypted_token": cipher(KEY_B, "abc123", "tok-b"), "nonce": "abc123"})
+def validate(mac_hex, nonce, **extra):
+    sent.clear()
+    return c.post("/iot/validate_token", headers=dev_hdr,
+                  json={"encrypted_token": mac_hex, "nonce": nonce, **extra})
+
+
+NONCE = "0123456789abcdef"
+
+# 앱(crypto-js HmacSHA256)과 공유하는 고정 벡터. 앱 쪽도 같은 값이 나와야 한다.
+VECTOR = "ab30bf044923fcb75911a2375752c649ffcbdc4ca1aa251e391dcdc9fa3fdb8a"
+assert ble_mac(bytes(range(16)), NONCE, "tok") == VECTOR
+print("[ok] mac 형식이 고정 벡터와 일치한다")
+
+# ── normal: user_uuid 없이 mac이 일치하는 사용자(B)가 식별된다 ──
+r = validate(mac(KEY_B, NONCE, "tok-b"), NONCE)
 assert r.status_code == 200, r.data
 assert any(u == B for u, _ in sent), sent
 print("[ok] user_uuid 없이 기기 매핑 사용자 키로 요청자를 찾는다")
 
-# nonce가 다르면 거부
-r = c.post("/iot/validate_token", headers=dev_hdr,
-           json={"encrypted_token": cipher(KEY_B, "abc123", "tok-b"), "nonce": "ffffff"})
+# 과거 mac을 새 nonce와 함께 재전송하면 거부(nonce 바꿔치기 불가)
+r = validate(mac(KEY_B, NONCE, "tok-b"), "fedcba9876543210")
 assert r.status_code == 400, r.data
-print("[ok] nonce 불일치는 거부된다")
+print("[ok] nonce 불일치(재전송)는 거부된다")
 
-# 매핑되지 않은 사용자의 키로 만든 암호문은 거부
-r = c.post("/iot/validate_token", headers=dev_hdr,
-           json={"encrypted_token": cipher(os.urandom(16), "abc123", "tok-b"), "nonce": "abc123"})
+# 매핑되지 않은 사용자의 키로 만든 mac은 거부
+r = validate(mac(os.urandom(16), NONCE, "tok-b"), NONCE)
 assert r.status_code == 400, r.data
-print("[ok] 어떤 매핑 사용자의 키로도 안 풀리면 거부된다")
+print("[ok] 어떤 매핑 사용자의 키로도 일치하지 않으면 거부된다")
 
 # 본문에 user_uuid를 넣어도 무시된다(다른 사용자를 사칭할 수 없다)
-r = c.post("/iot/validate_token", headers=dev_hdr,
-           json={"user_uuid": A, "encrypted_token": cipher(KEY_B, "abc123", "tok-b"), "nonce": "abc123"})
+r = validate(mac(KEY_B, NONCE, "tok-b"), NONCE, user_uuid=A)
 assert r.status_code == 200, r.data
 print("[ok] 본문의 user_uuid는 신뢰하지 않는다")
+
+# 만료된 토큰도 사용자를 특정해 거부 사유를 본인에게 알린다
+r = validate(mac(KEY_B, NONCE, "tok-b-old"), NONCE)
+assert r.status_code == 400, r.data
+assert (B, "인증 실패 — 사용할 수 없는 토큰입니다") in sent, sent
+print("[ok] 만료 토큰은 거부되고 본인에게 사유가 통지된다")
+
+# 토큰 없이 보낸 경우(mac = HMAC(key, nonce))도 사용자를 특정해 통지한다
+r = validate(mac(KEY_A, NONCE, ""), NONCE)
+assert r.status_code == 400, r.data
+assert (A, "인증 실패 — 발급받은 토큰이 없습니다") in sent, sent
+print("[ok] 토큰 미보유는 거부되고 본인에게 사유가 통지된다")
+
+# 이전 6자리 nonce·형식이 다른 mac은 형식 오류
+assert validate(mac(KEY_B, "abc123", "tok-b"), "abc123").status_code == 400
+assert validate("ab" * 40, NONCE).status_code == 400
+print("[ok] nonce 16자·mac 64자 hex가 아니면 거부된다")
 
 # ── setup: master는 setup-token을 요청한 사용자다 ──
 def as_user(uid):

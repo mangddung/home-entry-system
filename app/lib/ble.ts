@@ -1,6 +1,6 @@
 import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
 import { DEBUG_LOG, DEVICE_STATUS_KEY, USER_SECRET_KEY } from "@/lib/constants";
-import { encryptAES, sha256 } from "@/lib/crypto";
+import { hmacSha256, sha256 } from "@/lib/crypto";
 import { createGate } from "@/lib/proximity-rules";
 import { appendSystemLog, formatTimestamp } from "@/lib/system-log";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -273,14 +273,9 @@ export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, no
       });
       return false;
     }
-    const payload = {
-      nonce: nonce,
-      timestamp: new Date().toISOString(),
-      auth_token: ioTDevice.auth_token?.token_value,
-    };
-
-    const encryptedData = encryptAES(JSON.stringify(payload), bleEncryptionKey);
-    const encodedData = Buffer.from(encryptedData, "utf-8").toString("base64");
+    // 토큰 원문은 보내지 않는다. 서버가 ESP에게 받은 nonce로 같은 mac을 다시 계산해 비교한다.
+    const mac = hmacSha256(nonce + (ioTDevice.auth_token?.token_value ?? ""), bleEncryptionKey);
+    const encodedData = Buffer.from(mac, "utf-8").toString("base64");
     await connected.writeCharacteristicWithoutResponseForService(
       bleUuids.ble_service_uuid as string,
       bleUuids.ble_write_uuid as string,

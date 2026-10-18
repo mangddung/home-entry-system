@@ -282,7 +282,7 @@ static void task_iot_init(void *arg)
 
 typedef struct {
     char encrypted_token[2048];
-    char nonce[16];
+    char nonce[17];   // 16-hex-char OTP + NUL
 } validate_args_t;
 
 static void task_validate_token(void *arg)

@@ -34,7 +34,8 @@ static const char *TAG = "ble";
 // ── State ─────────────────────────────────────────────────────────────────────
 static uint16_t s_conn_handle  = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_notify_handle;               // value handle for char_esp_to_app
-static char     s_current_otp[7] = "";         // 6-hex-char OTP + NUL
+static char     s_current_otp[17] = "";        // 16-hex-char OTP(64bit) + NUL
+static bool     s_otp_issued = false;          // 연결당 OTP 1회만 발급(재구독으로 nonce 재추첨 방지)
 
 static esp_timer_handle_t s_auth_timer = NULL;
 static esp_timer_handle_t s_subscribe_timer = NULL;
@@ -168,21 +169,15 @@ static void process_write_payload(const char *msg, uint16_t len)
 {
     auth_timer_stop();
 
-    // Payload format: "<ciphertext>" (hex, IV + data). user_uuid는 보내지 않는다.
-    size_t cipher_len = len;
-    if (cipher_len < 64 || cipher_len % 32 != 0) {
-        ESP_LOGE(TAG, "Ciphertext length invalid (%zu)", cipher_len);
+    // Payload format: "<mac>" (hex 64자, HMAC-SHA256(user key, nonce + auth_token)). user_uuid는 보내지 않는다.
+    if (len != 64) {
+        ESP_LOGE(TAG, "MAC length invalid (%u)", len);
         return;
     }
 
-    if (cipher_len >= 2048) {
-        ESP_LOGE(TAG, "Ciphertext too long (%zu)", cipher_len);
-        return;
-    }
+    ESP_LOGI(TAG, "Format OK (%u bytes)", len);
 
-    ESP_LOGI(TAG, "Format OK (%zu bytes)", cipher_len);
-
-    char nonce[7];
+    char nonce[sizeof(s_current_otp)];
     strlcpy(nonce, s_current_otp, sizeof(nonce));
     s_current_otp[0] = '\0';
 
@@ -319,13 +314,15 @@ void ble_server_clear_bonds(void)
 // ── OTP 발급: 앱이 notify를 구독한 뒤에만 호출된다 ───────────────────────────
 static void issue_otp(uint16_t conn_handle)
 {
-    uint32_t rnd = esp_random() & 0x00FFFFFF;
-    snprintf(s_current_otp, sizeof(s_current_otp), "%06" PRIx32, rnd);
+    s_otp_issued = true;
+    snprintf(s_current_otp, sizeof(s_current_otp), "%08" PRIx32 "%08" PRIx32,
+             esp_random(), esp_random());
     ESP_LOGI(TAG, "OTP issued: %s", s_current_otp);
 
     auth_timer_start();
 
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(s_current_otp, 6);
+    // 16바이트: 기본 MTU(payload 20바이트) 안에 들어간다
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(s_current_otp, sizeof(s_current_otp) - 1);
     if (om) {
         ble_gatts_notify_custom(conn_handle, s_notify_handle, om);
     }
@@ -339,6 +336,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
             if (event->connect.status == 0) {
                 ESP_LOGI(TAG, "App connected (handle %d)", event->connect.conn_handle);
                 s_conn_handle = event->connect.conn_handle;
+                s_otp_issued  = false;
                 subscribe_timer_start();
             } else {
                 ble_advertise();
@@ -356,7 +354,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg)
 
         case BLE_GAP_EVENT_SUBSCRIBE:
             if (event->subscribe.attr_handle == s_notify_handle &&
-                event->subscribe.cur_notify) {
+                event->subscribe.cur_notify && !s_otp_issued) {
                 subscribe_timer_stop();
                 issue_otp(event->subscribe.conn_handle);
             }
