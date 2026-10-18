@@ -191,15 +191,28 @@ export const scanDevice = async (
   });
 };
 
-export const connectDevice = async (device: Device, tryCount: any = 0): Promise<Device | null> => {
+// shouldAbort: 대기 중인 connect는 OS 타임아웃(약 30초)까지 안 끝나므로, true가 되면 직접 취소하고 재시도도 멈춘다
+export const connectDevice = async (
+  device: Device,
+  tryCount: any = 0,
+  shouldAbort?: () => boolean,
+): Promise<Device | null> => {
   let connected: Device | null = null;
-  while (tryCount < 5) {
+  let aborted = false;
+  while (tryCount < 5 && !aborted) {
+    const watch = shouldAbort && setInterval(() => {
+      if (!shouldAbort()) return;
+      aborted = true;
+      manager.cancelDeviceConnection(device.id).catch(() => {});
+    }, 500);
     try {
       connected = await device.connect();
       break;
     } catch (e: any) {
       tryCount++;
       logDebug({ event_name, log_type: "WARNING", message: `실패 재시도(${tryCount}회): ${e.message}` });
+    } finally {
+      if (watch) clearInterval(watch);
     }
   }
 

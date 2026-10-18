@@ -29,6 +29,10 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 const TIMER_SECONDS = 180;
 const SCAN_SECONDS = 30;
+// 이 시간 동안 광고가 안 잡히면 목록에서 뺀다. 연결 대기 중이면 다른 휴대폰이 먼저 연결한 것으로 본다.
+const STALE_MS = 3000;
+// 스캔이 끝나 광고를 볼 수 없을 때의 연결 대기 상한
+const CONNECT_TIMEOUT_MS = 10000;
 const WIFI_LIST_PREVIEW_COUNT = 5;
 
 function getSignalInfo(rssi: number | null): { name: string; color: string } {
@@ -115,6 +119,7 @@ export default function DeviceSetupScreen() {
   const [isScanning, setIsScanning] = useState(false);
   const [isConnecting, setIsConnecting] = useState<string | null>(null);
   const lastSeenRef = useRef<Map<string, number>>(new Map());
+  const isScanningRef = useRef(false);
   const [scanTimeLeft, setScanTimeLeft] = useState(SCAN_SECONDS);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -152,6 +157,7 @@ export default function DeviceSetupScreen() {
   }, [connected]);
 
   const startScan = useCallback(async (ioTDevice: IoTDevice) => {
+    isScanningRef.current = true;
     setIsScanning(true);
     setScanTimeLeft(SCAN_SECONDS);
     setDevices([]);
@@ -171,7 +177,7 @@ export default function DeviceSetupScreen() {
       const now = Date.now();
       setDevices((prev) => prev.filter((d) => {
         const last = lastSeenRef.current.get(d.id);
-        return last !== undefined && now - last < 3000;
+        return last !== undefined && now - last < STALE_MS;
       }));
     }, 1000);
 
@@ -188,6 +194,7 @@ export default function DeviceSetupScreen() {
 
     clearInterval(staleTimer);
     clearInterval(timer);
+    isScanningRef.current = false;
     setIsScanning(false);
   }, []);
 
@@ -774,9 +781,19 @@ export default function DeviceSetupScreen() {
                   if (isConnecting) return;
                   setIsConnecting(d.id);
                   await resetBond(d.id);
-                  const conn = await connectDevice(d);
+                  const startedAt = Date.now();
+                  // 기기는 연결 1개만 받고 연결되면 광고를 멈춘다. 대기 중에 광고가 사라지면 다른 휴대폰이 잡은 것.
+                  const conn = await connectDevice(d, 0, () =>
+                    isScanningRef.current
+                      ? Date.now() - (lastSeenRef.current.get(d.id) ?? 0) >= STALE_MS
+                      : Date.now() - startedAt >= CONNECT_TIMEOUT_MS,
+                  );
                   if (!conn) {
                     setIsConnecting(null);
+                    showAlert(
+                      "연결 실패",
+                      "기기에 연결하지 못했습니다. 다른 휴대폰이 이미 연결 중일 수 있습니다. 잠시 후 다시 시도해 주세요.",
+                    );
                     return;
                   }
                   await markPendingBond(d.id);
