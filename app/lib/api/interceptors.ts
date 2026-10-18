@@ -13,7 +13,7 @@ import {
   USER_UUID_KEY,
 } from "../constants";
 import { stopBackgroundTracking } from "../background-tracking";
-import { triggerSessionAlert } from "../session-alert";
+import { showAlert } from "../alert";
 import { getTokenSecure, setTokenSecure } from "../token-storage";
 import { refreshToken } from "./auth";
 import { clearDeviceStorage } from "./devices";
@@ -71,11 +71,14 @@ export function setupAxiosInterceptors() {
 
       if (error.response?.status === 401 && !isHandling401) {
         isHandling401 = true;
-        triggerSessionAlert("세션 만료", "로그인이 필요합니다. 다시 로그인해주세요.", async () => {
-          await clearSession();
-          router.replace("/login-oauth");
-          isHandling401 = false;
-        });
+        showAlert("세션 만료", "로그인이 필요합니다. 다시 로그인해주세요.", [{
+          text: "확인",
+          onPress: async () => {
+            await clearSession();
+            router.replace("/login-oauth");
+            isHandling401 = false;
+          },
+        }]);
       }
       return Promise.reject(error);
     },

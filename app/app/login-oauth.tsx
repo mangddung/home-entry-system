@@ -1,5 +1,6 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
+import { showAlert } from "@/lib/alert";
 import { fetchSecretKey } from "@/lib/api/auth";
 import { fetchFcmToken } from "@/lib/api/fcm";
 import {
@@ -16,7 +17,6 @@ import * as WebBrowser from "expo-web-browser";
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Image,
   StyleSheet,
   Text,
@@ -68,7 +68,7 @@ export default function LoginOAuthScreen() {
     } catch (e) {
       console.error("[kakao_config] error=", e);
       appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `kakao config 요청 실패: ${e}` });
-      Alert.alert("서버 통신 실패", "카카오 로그인 설정을 불러오지 못했습니다.");
+      showAlert("서버 통신 실패", "카카오 로그인 설정을 불러오지 못했습니다.");
     }
   };
 
@@ -102,7 +102,7 @@ export default function LoginOAuthScreen() {
 
       if (result.type !== "success") {
         appendSystemLog({ event_name: "Login", log_type: "WARNING", message: `카카오 인증 세션 실패: ${result.type}` });
-        Alert.alert("오류", "로그인 중 오류가 발생했습니다.(코드 101)");
+        showAlert("오류", "로그인 중 오류가 발생했습니다.(코드 101)");
         router.replace("/login-oauth");
         return;
       }
@@ -115,7 +115,7 @@ export default function LoginOAuthScreen() {
 
       if (error || !access_token || !refresh_token || !userUuid) {
         appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `카카오 로그인 콜백 오류: ${error ?? "토큰 누락"}` });
-        Alert.alert("로그인 실패", error ?? "인증에 실패했습니다.");
+        showAlert("로그인 실패", error ?? "인증에 실패했습니다.");
         return;
       }
 
@@ -128,7 +128,7 @@ export default function LoginOAuthScreen() {
 
       if (key_request_result.type !== "success") {
         appendSystemLog({ event_name: "Login", log_type: "ERROR", message: "secret key 요청 실패로 로그인 중단" });
-        Alert.alert("오류", "로그인 중 오류가 발생했습니다.(코드 102)");
+        showAlert("오류", "로그인 중 오류가 발생했습니다.(코드 102)");
         router.replace("/login-oauth");
         return;
       }
@@ -138,7 +138,7 @@ export default function LoginOAuthScreen() {
       router.replace("/(tabs)/home");
     } catch (e) {
       appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `로그인 처리 중 예외: ${e}` });
-      Alert.alert("오류", "로그인 중 오류가 발생했습니다.(100)");
+      showAlert("오류", "로그인 중 오류가 발생했습니다.(100)");
       router.replace("/login-oauth");
     } finally {
       setLoading(false);

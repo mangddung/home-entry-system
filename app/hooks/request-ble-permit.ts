@@ -1,4 +1,5 @@
-import { Alert, PermissionsAndroid, Platform } from "react-native";
+import { showAlert } from "@/lib/alert";
+import { PermissionsAndroid, Platform } from "react-native";
 
 export async function requestBluetoothPermission(): Promise<boolean> {
   if (Platform.OS === "ios") {
@@ -37,7 +38,7 @@ export async function requestBluetoothPermission(): Promise<boolean> {
     }
   }
 
-  Alert.alert("Permission have not been granted");
+  showAlert("Permission have not been granted");
 
   return false;
 }

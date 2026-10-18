@@ -1,5 +1,6 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
+import { showAlert } from "@/lib/alert";
 import { fetchDeviceSetupToken, fetchSetupUuid, loadDevices } from "@/lib/api/devices";
 import { connectDevice, receiveData, scanDevice, sendSetupCode, sendWifiSetup, stopScan, triggerPairing } from "@/lib/ble";
 import { commitBond, dropPendingBond, markPendingBond, resetBond } from "@/lib/bond";
@@ -13,7 +14,6 @@ import { router, useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Animated,
   KeyboardAvoidingView,
   Platform,
@@ -121,7 +121,7 @@ export default function DeviceSetupScreen() {
   useEffect(() => {
     void (async () => {
       if ((await loadDevices()).length >= MAX_DEVICES_PER_USER) {
-        Alert.alert("등록 제한", `기기는 최대 ${MAX_DEVICES_PER_USER}개까지 등록할 수 있습니다.`, [
+        showAlert("등록 제한", `기기는 최대 ${MAX_DEVICES_PER_USER}개까지 등록할 수 있습니다.`, [
           { text: "확인", onPress: () => router.back() },
         ]);
       }
@@ -144,7 +144,7 @@ export default function DeviceSetupScreen() {
     disconnectIntentional.current = false;
     const subscription = connected.onDisconnected(() => {
       if (disconnectIntentional.current) return;
-      Alert.alert("연결 끊김", "기기와의 연결이 끊어졌습니다.", [
+      showAlert("연결 끊김", "기기와의 연결이 끊어졌습니다.", [
         { text: "확인", onPress: () => router.replace("/") },
       ]);
     });
@@ -198,7 +198,7 @@ export default function DeviceSetupScreen() {
         await fetchSetupUuid();
         const raw = await getTokenSecure(DEVICE_SETUP_KEY);
         if (!raw) {
-          Alert.alert("setup setupDevice fetch failed");
+          showAlert("setup setupDevice fetch failed");
           return;
         }
         const parsedSetupDevice: IoTDevice = JSON.parse(raw);
@@ -387,7 +387,7 @@ export default function DeviceSetupScreen() {
                 const setup_token = await fetchDeviceSetupToken(device_uuid);
                 setIsSubmitting(false);
                 if (typeof setup_token !== "string" || !setup_token) {
-                  Alert.alert("설정 실패", "설정 토큰을 받지 못했습니다. 다시 시도해 주세요.", [
+                  showAlert("설정 실패", "설정 토큰을 받지 못했습니다. 다시 시도해 주세요.", [
                     { text: "확인" },
                   ]);
                   return;
@@ -612,7 +612,7 @@ export default function DeviceSetupScreen() {
                 );
                 if (!sent) {
                   setIsSubmitting(false);
-                  Alert.alert("설정 실패", "기기로 설정 정보를 보내지 못했습니다.", [
+                  showAlert("설정 실패", "기기로 설정 정보를 보내지 못했습니다.", [
                     { text: "확인" },
                   ]);
                   return;
@@ -629,9 +629,9 @@ export default function DeviceSetupScreen() {
                   await setTokenSecure(UNFIGURED_DEVICES_KEY, JSON.stringify(device));
                   router.push("/device/location-setup");
                 } else if (apiResponse?.startsWith("WIFI_FAIL")) {
-                  Alert.alert("Wi-Fi 연결 실패", wifiFailMessage(apiResponse), [{ text: "확인" }]);
+                  showAlert("Wi-Fi 연결 실패", wifiFailMessage(apiResponse), [{ text: "확인" }]);
                 } else {
-                  Alert.alert("설정 실패", "기기 등록에 실패했습니다. 잠시 후 다시 시도해 주세요.", [
+                  showAlert("설정 실패", "기기 등록에 실패했습니다. 잠시 후 다시 시도해 주세요.", [
                     { text: "확인" },
                   ]);
                 }

@@ -1,11 +1,11 @@
-import { CustomAlert } from "@/components/custom-alert";
+import { type AlertButton, CustomAlert } from "@/components/custom-alert";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { fetchDevices } from "@/lib/api/devices";
 import { setupAxiosInterceptors } from "@/lib/api/interceptors";
 import { updateGeoFence } from "@/lib/background-tracking";
 import { appendFcmNotification } from "@/lib/fcm-log";
 import { DEVICES_REFRESHED_EVENT } from "@/lib/constants";
-import { registerSessionAlert } from "@/lib/session-alert";
+import { registerAlertHost } from "@/lib/alert";
 import { applyThemePref, getThemePref } from "@/lib/theme-pref";
 import "@/tasks/bg-location";
 import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native";
@@ -17,7 +17,7 @@ import type { FeedbackAnswer } from "@/lib/proximity-rules";
 import * as Notifications from "expo-notifications";
 import { router, Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import "react-native-get-random-values";
 import "react-native-reanimated";
 import { AppState, DeviceEventEmitter, Platform } from "react-native";
@@ -114,21 +114,17 @@ export const unstable_settings = {
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
-  const [sessionAlert, setSessionAlert] = useState<{
-    title: string;
-    message: string;
-    onConfirm: () => void;
-  } | null>(null);
-  const onConfirmRef = useRef<(() => void) | null>(null);
+  // showAlert로 들어온 알림을 순서대로 하나씩 띄운다(겹쳐 들어와도 버튼 콜백을 잃지 않게)
+  const [alerts, setAlerts] = useState<{ title: string; message?: string; buttons?: AlertButton[] }[]>([]);
+  const currentAlert = alerts[0];
 
   useEffect(() => {
     void getThemePref().then(applyThemePref);
   }, []);
 
   useEffect(() => {
-    registerSessionAlert((title, message, onConfirm) => {
-      onConfirmRef.current = onConfirm;
-      setSessionAlert({ title, message, onConfirm });
+    registerAlertHost((title, message, buttons) => {
+      setAlerts((q) => [...q, { title, message, buttons }]);
     });
   }, []);
 
@@ -177,16 +173,16 @@ export default function RootLayout() {
         <StatusBar style="auto" />
 
         <CustomAlert
-          visible={!!sessionAlert}
-          title={sessionAlert?.title ?? ""}
-          message={sessionAlert?.message}
-          buttons={[{
-            text: "확인",
+          visible={!!currentAlert}
+          title={currentAlert?.title ?? ""}
+          message={currentAlert?.message}
+          buttons={(currentAlert?.buttons?.length ? currentAlert.buttons : [{ text: "확인" }]).map((b) => ({
+            ...b,
             onPress: () => {
-              setSessionAlert(null);
-              onConfirmRef.current?.();
+              setAlerts((q) => q.slice(1));
+              b.onPress?.();
             },
-          }]}
+          }))}
           onRequestClose={() => {}}
         />
       </ThemeProvider>

@@ -1,4 +1,5 @@
-import { Alert, PermissionsAndroid, Platform } from "react-native";
+import { showAlert } from "@/lib/alert";
+import { PermissionsAndroid, Platform } from "react-native";
 
 export async function requestLocationPermissions(): Promise<boolean> {
   if (Platform.OS !== "android") {
@@ -29,7 +30,7 @@ export async function requestLocationPermissions(): Promise<boolean> {
       if (alreadyGranted) return true;
 
       await new Promise<void>((resolve) => {
-        Alert.alert(
+        showAlert(
           "Background Location Required",
           'To track your location when the app is in the background, please select "Allow all the time" on the next screen.',
           [{ text: "Continue", onPress: () => resolve() }],

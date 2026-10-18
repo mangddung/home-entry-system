@@ -1,5 +1,6 @@
 import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
 import { requestLocationPermissions } from "@/hooks/request-location-permit";
+import { showAlert } from "@/lib/alert";
 import { verifyToken } from "@/lib/api/auth";
 import { updateGeoFence } from "@/lib/background-tracking";
 // import { setupBgLocation, startBgLocationTask } from "@/lib/background-tracking"; // GPS 폴링 방식 (geofence로 대체)
@@ -9,7 +10,7 @@ import { checkAuthToken, setTokenSecure } from "@/lib/token-storage";
 import { startActivityTransitionLog } from "@/modules/activity-transition";
 import { Redirect } from "expo-router";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Alert, AppState, Linking, PermissionsAndroid, Platform, Text, View } from "react-native";
+import { ActivityIndicator, AppState, Linking, PermissionsAndroid, Platform, Text, View } from "react-native";
 import {
   BatteryOptEnabled,
   RequestDisableOptimization,
@@ -49,7 +50,7 @@ export default function IndexScreen() {
     ]
       .filter(Boolean)
       .join(", ");
-    Alert.alert(
+    showAlert(
       "권한 필요",
       `다음 권한을 허용해주세요\n${missing}`,
       [
@@ -70,7 +71,6 @@ export default function IndexScreen() {
           },
         },
       ],
-      { cancelable: false },
     );
     setPermissionDenied(true);
   };
