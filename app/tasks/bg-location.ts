@@ -122,7 +122,16 @@ const stopBleTracking = (uuid: string) => {
 const startBleTracking = async (initialDevice: IoTDevice) => {
   const uuid = initialDevice.device_uuid;
   let device = initialDevice;
-  if (bleInProgress.has(uuid)) return;
+  if (bleInProgress.has(uuid)) {
+    if (!bleAbort.has(uuid)) return; // 이미 추적 중
+    // exit 직후 재진입: 이전 루프가 abort를 아직 확인하기 전이다. 그냥 돌아가면 그 루프가 곧 끝나
+    // 이번 진입이 사라지므로(Enter는 다시 오지 않는다) abort를 풀고 그 루프를 이어 쓴다.
+    // 루프의 while 확인부터 finally의 bleInProgress.delete까지는 await가 없어 여기서 풀면 루프가 반드시 계속 돈다.
+    bleAbort.delete(uuid);
+    bleTimers.set(uuid, setTimeout(() => stopBleTracking(uuid), BLE_MAX_TRACKING_MS));
+    appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble tracking resumed (re-enter before stop)" });
+    return;
+  }
   bleInProgress.add(uuid);
   bleAbort.delete(uuid);
   bleTimers.set(uuid, setTimeout(() => stopBleTracking(uuid), BLE_MAX_TRACKING_MS));
