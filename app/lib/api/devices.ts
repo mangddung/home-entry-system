@@ -13,6 +13,20 @@ import { getTokenSecure, setTokenSecure } from "../token-storage";
 import type { DeviceStatus, IoTDevice, SetupUuids } from "../types";
 import { getApiErrorMessage } from "./errors";
 
+// DEVICE_STATUS_KEY 읽고-고치고-쓰기는 전부 여기로 보낸다. fn이 돌려준 목록을 그대로 저장한다.
+// 겹친 지오펜스의 Enter/Exit 태스크가 동시에 돌아도 차례로 실행돼 서로의 변경을 덮어쓰지 않는다.
+// ponytail: 같은 JS 런타임 안에서만 직렬화된다. 런타임이 둘로 갈라지면 저장소 수준 락이 필요하다.
+let statusQueue: Promise<void> = Promise.resolve();
+export const updateDeviceStatus = (fn: (list: DeviceStatus[]) => DeviceStatus[]): Promise<void> => {
+  const run = statusQueue.then(async () => {
+    const raw = await getTokenSecure(DEVICE_STATUS_KEY);
+    const list: DeviceStatus[] = raw ? JSON.parse(raw) : [];
+    await setTokenSecure(DEVICE_STATUS_KEY, JSON.stringify(fn(list)));
+  });
+  statusQueue = run.catch(() => {}); // 한 번 실패해도 뒤 작업은 계속 실행
+  return run;
+};
+
 export const fetchDevices = async () => {
   const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
   if (!access_token) {
@@ -36,28 +50,24 @@ export const fetchDevices = async () => {
     );
 
     // device status 업데이트
-    const storedDeviceStatus: string | null = await getTokenSecure(DEVICE_STATUS_KEY);
-    const parsedDeviceStatus: DeviceStatus[] = storedDeviceStatus
-      ? JSON.parse(storedDeviceStatus)
-      : [];
+    await updateDeviceStatus((parsedDeviceStatus) => {
+      const existingUuids = new Set(parsedDeviceStatus.map((s) => s.device_uuid));
+      const deviceUuids = new Set(devices.map((d) => d.device_uuid));
 
-    const existingUuids = new Set(parsedDeviceStatus.map((s) => s.device_uuid));
-    const deviceUuids = new Set(devices.map((d) => d.device_uuid));
-
-    // 없으면 추가
-    for (const device of devices) {
-      if (!existingUuids.has(device.device_uuid)) {
-        parsedDeviceStatus.push({
-          device_uuid: device.device_uuid,
-          isInside: false,
-          bleSuccess: false,
-        });
+      // 없으면 추가
+      for (const device of devices) {
+        if (!existingUuids.has(device.device_uuid)) {
+          parsedDeviceStatus.push({
+            device_uuid: device.device_uuid,
+            isInside: false,
+            bleSuccess: false,
+          });
+        }
       }
-    }
 
-    // 디바이스 목록에 없으면 삭제
-    const updatedStatus = parsedDeviceStatus.filter((s) => deviceUuids.has(s.device_uuid));
-    await setTokenSecure(DEVICE_STATUS_KEY, JSON.stringify(updatedStatus));
+      // 디바이스 목록에 없으면 삭제
+      return parsedDeviceStatus.filter((s) => deviceUuids.has(s.device_uuid));
+    });
 
     return { type: "success", message: "디바이스 목록을 불러왔습니다." };
   } catch (error) {

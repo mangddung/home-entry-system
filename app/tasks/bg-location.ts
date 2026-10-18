@@ -2,14 +2,14 @@ import { setBleScanning } from "@/lib/background-tracking";
 import { scanDevice, userTokenExchange } from "@/lib/ble";
 import { getThresholdFor, recordTrigger } from "@/lib/proximity";
 import { ScanMode } from "react-native-ble-plx";
-import { loadDevices } from "@/lib/api/devices";
+import { loadDevices, updateDeviceStatus } from "@/lib/api/devices";
 import {
   BG_GEOFENCE_TASK,
   DEVICE_STATUS_KEY,
 } from "@/lib/constants";
 import { isTokenAlive } from "@/lib/schedule";
 import { appendSystemLog } from "@/lib/system-log";
-import { getTokenSecure, setTokenSecure } from "@/lib/token-storage";
+import { getTokenSecure } from "@/lib/token-storage";
 import { DeviceStatus, IoTDevice } from "@/lib/types";
 import { getStillSince } from "@/modules/activity-transition";
 import * as Location from "expo-location";
@@ -241,21 +241,21 @@ TaskManager.defineTask(BG_GEOFENCE_TASK, async ({ data, error }) => {
   const uuid = region.identifier ?? "";
   if (!uuid) return;
 
-  const storedDeviceStatus: string | null = await getTokenSecure(DEVICE_STATUS_KEY);
-  const parsedDeviceStatus: DeviceStatus[] = storedDeviceStatus
-    ? JSON.parse(storedDeviceStatus)
-    : [];
-  const status = parsedDeviceStatus.find((s) => s.device_uuid === uuid);
-
+  // 겹친 지오펜스는 영역마다 태스크가 따로 동시에 돌므로 상태 저장은 updateDeviceStatus로 직렬화한다
   if (eventType === Location.LocationGeofencingEventType.Enter) {
     appendSystemLog({ event_name: uuid, log_type: "INFO", message: "geofence enter" });
-    if (status) {
-      status.isInside = true;
-      status.enteredAt = Date.now();
-    }
-    await setTokenSecure(DEVICE_STATUS_KEY, JSON.stringify(parsedDeviceStatus));
+    let opened = false;
+    await updateDeviceStatus((list) => {
+      const status = list.find((s) => s.device_uuid === uuid);
+      if (status) {
+        status.isInside = true;
+        status.enteredAt = Date.now();
+        opened = status.bleSuccess;
+      }
+      return list;
+    });
 
-    if (status?.bleSuccess) return; // 이미 열려 있으면 스킵
+    if (opened) return; // 이미 열려 있으면 스킵
 
     const devices = await loadDevices();
     const device = devices.find((d) => d.device_uuid === uuid);
@@ -268,11 +268,14 @@ TaskManager.defineTask(BG_GEOFENCE_TASK, async ({ data, error }) => {
     void startBleTracking(device);
   } else if (eventType === Location.LocationGeofencingEventType.Exit) {
     appendSystemLog({ event_name: uuid, log_type: "INFO", message: "geofence exit" });
-    if (status) {
-      status.isInside = false;
-      status.bleSuccess = false;
-    }
-    await setTokenSecure(DEVICE_STATUS_KEY, JSON.stringify(parsedDeviceStatus));
+    await updateDeviceStatus((list) => {
+      const status = list.find((s) => s.device_uuid === uuid);
+      if (status) {
+        status.isInside = false;
+        status.bleSuccess = false;
+      }
+      return list;
+    });
     stopBleTracking(uuid);
   }
 });

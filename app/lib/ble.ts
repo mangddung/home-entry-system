@@ -1,13 +1,14 @@
 import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
-import { DEBUG_LOG, DEVICE_STATUS_KEY, USER_SECRET_KEY } from "@/lib/constants";
+import { updateDeviceStatus } from "@/lib/api/devices";
+import { DEBUG_LOG, USER_SECRET_KEY } from "@/lib/constants";
 import { hmacSha256, sha256 } from "@/lib/crypto";
 import { createGate } from "@/lib/proximity-rules";
 import { appendSystemLog, formatTimestamp } from "@/lib/system-log";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Buffer } from "buffer";
 import { BleManager, Device, ScanMode } from "react-native-ble-plx";
-import { getTokenSecure, setTokenSecure } from "./token-storage";
-import { DebugLog, DeviceStatus, IoTDevice } from "./types";
+import { getTokenSecure } from "./token-storage";
+import { DebugLog, IoTDevice } from "./types";
 
 const event_name = "[BLE]";
 
@@ -58,6 +59,7 @@ export const startRssiScan = async (
     manager.stopDeviceScan();
     isScanning = false;
   };
+  if (isScanning) return null; // await 사이에 다른 스캔이 시작됐으면 겹치지 않게 물러난다(scanDevice 주석 참고)
   isScanning = true;
   // Android는 LowLatency에서 광고마다 콜백, iOS는 allowDuplicates가 있어야 반복 수신된다
   manager.startDeviceScan([...targets], { scanMode: ScanMode.LowLatency, allowDuplicates: true }, (error, device) => {
@@ -122,6 +124,10 @@ export const scanDevice = async (
     message: `스캔 시작 (service UUID: ${bleUuids.ble_service_uuid})`,
   });
 
+  // 위 await 사이에 다른 호출(겹친 지오펜스의 다른 기기 루프 등)이 먼저 스캔을 시작했을 수 있다.
+  // ble-plx는 새 스캔이 이전 스캔을 멈추지 않아 두 번 시작하면 리스너·네이티브 스캔이 새고 다른 기기 광고가 섞인다.
+  // 여기서 startDeviceScan까지는 await가 없어 확인과 세팅 사이에 끼어들 수 없다.
+  if (isScanning) return [];
   isScanning = true;
   const found = new Map<string, Device>();
   const gate = opts?.gate ? createGate(opts.gate.threshold) : null;
@@ -307,15 +313,13 @@ export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, no
     });
     // 검증 완료 response 추가 예정
 
-    // device status 변경
-    const storedDeviceStatus: string | null = await getTokenSecure(DEVICE_STATUS_KEY);
-    const parsedDeviceStatus: DeviceStatus[] = storedDeviceStatus
-      ? JSON.parse(storedDeviceStatus)
-      : [];
-    parsedDeviceStatus.forEach((deviceStatus) => {
-      deviceStatus.bleSuccess = deviceStatus.device_uuid === ioTDevice.device_uuid;
+    // device status 변경. 다른 기기 기록은 건드리지 않는다(이탈 시 각자 초기화된다).
+    // 겹친 지오펜스에서 먼저 연 기기의 성공 기록을 지우면 재등록 시 initial Enter로 그 기기가 다시 열린다.
+    await updateDeviceStatus((list) => {
+      const status = list.find((s) => s.device_uuid === ioTDevice.device_uuid);
+      if (status) status.bleSuccess = true;
+      return list;
     });
-    await setTokenSecure(DEVICE_STATUS_KEY, JSON.stringify(parsedDeviceStatus));
     return true;
   } catch (e: any) {
     logDebug({
