@@ -84,6 +84,9 @@ const handlePush = async (remoteMessage: FirebaseMessagingTypes.RemoteMessage) =
     android: {
       channelId,
       pressAction: { id: "default" },
+      // notifee는 기본으로 시간을 숨긴다. Doze로 늦게 받아도 서버가 보낸 시각이 보이게 sentTime을 쓴다.
+      timestamp: remoteMessage.sentTime || Date.now(),
+      showTimestamp: true,
       actions: feedbackId ? FEEDBACK_ACTIONS.map((a) => ({ title: a.title, pressAction: { id: a.id } })) : undefined,
     },
     ios: feedbackId ? { categoryId: FEEDBACK_CATEGORY } : undefined,
