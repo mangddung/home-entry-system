@@ -1,5 +1,4 @@
 import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
-import { refreshToken } from "@/lib/api/auth";
 import { clearDeviceStorage } from "@/lib/api/devices";
 import { revokeFcmToken } from "@/lib/api/fcm";
 import { stopBackgroundTracking } from "@/lib/background-tracking";
@@ -223,15 +222,21 @@ export default function SettingsScreen() {
           <Text style={[styles.sectionTitle, { color: colors.icon }]}>개발자 도구</Text>
           <View style={[styles.card, { backgroundColor: cardBg }]}>
             <SettingRow
-              icon="refresh"
+              icon="devices"
               iconColor="#fff"
               iconBg="#8b5cf6"
-              label="토큰 갱신"
+              label="디바이스 디버그"
               textColor={colors.text}
-              onPress={async () => {
-                const result = await refreshToken();
-                showAlert(result.type === "success" ? "성공" : "오류", result.message);
-              }}
+              onPress={() => router.push("/device/device_debug")}
+            />
+            <View style={[styles.divider, { backgroundColor: dividerColor }]} />
+            <SettingRow
+              icon="bluetooth-audio"
+              iconColor="#fff"
+              iconBg="#2563eb"
+              label="BLE 디버그"
+              textColor={colors.text}
+              onPress={() => router.push("/ble-debug")}
             />
             <View style={[styles.divider, { backgroundColor: dividerColor }]} />
             <SettingRow

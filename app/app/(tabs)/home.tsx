@@ -281,38 +281,28 @@ export default function HomeScreen() {
         </View>
 
         {/* 바로가기 */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: colors.icon }]}>바로가기</Text>
-          <View style={[styles.actionList, { backgroundColor: cardBg }]}>
-            {isOnline && (
-              <>
-                <TouchableOpacity
-                  style={styles.actionItem}
-                  onPress={() => router.push("/device/device_setup")}
-                >
-                  <Text style={[styles.actionText, { color: colors.text }]}>기기 추가</Text>
-                  <Text style={[styles.chevron, { color: colors.icon }]}>›</Text>
-                </TouchableOpacity>
-                <View style={[styles.divider, { backgroundColor: dividerColor }]} />
-                <TouchableOpacity
-                  style={styles.actionItem}
-                  onPress={() => router.push("/register_invite_code")}
-                >
-                  <Text style={[styles.actionText, { color: colors.text }]}>초대 코드 가입</Text>
-                  <Text style={[styles.chevron, { color: colors.icon }]}>›</Text>
-                </TouchableOpacity>
-                <View style={[styles.divider, { backgroundColor: dividerColor }]} />
-              </>
-            )}
-            <TouchableOpacity
-              style={styles.actionItem}
-              onPress={() => router.push("/device/device_debug")}
-            >
-              <Text style={[styles.actionText, { color: colors.text }]}>디바이스 디버그</Text>
-              <Text style={[styles.chevron, { color: colors.icon }]}>›</Text>
-            </TouchableOpacity>
+        {isOnline && (
+          <View style={styles.section}>
+            <Text style={[styles.sectionTitle, { color: colors.icon }]}>바로가기</Text>
+            <View style={[styles.actionList, { backgroundColor: cardBg }]}>
+              <TouchableOpacity
+                style={styles.actionItem}
+                onPress={() => router.push("/device/device_setup")}
+              >
+                <Text style={[styles.actionText, { color: colors.text }]}>기기 추가</Text>
+                <Text style={[styles.chevron, { color: colors.icon }]}>›</Text>
+              </TouchableOpacity>
+              <View style={[styles.divider, { backgroundColor: dividerColor }]} />
+              <TouchableOpacity
+                style={styles.actionItem}
+                onPress={() => router.push("/register_invite_code")}
+              >
+                <Text style={[styles.actionText, { color: colors.text }]}>초대 코드 가입</Text>
+                <Text style={[styles.chevron, { color: colors.icon }]}>›</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        )}
       </ScrollView>
 
       <Modal

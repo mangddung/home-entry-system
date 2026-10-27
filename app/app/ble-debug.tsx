@@ -6,9 +6,10 @@ import { useColorScheme } from "@/hooks/use-color-scheme";
 import { loadDevices } from "@/lib/api/devices";
 import { startRssiScan } from "@/lib/ble";
 import type { IoTDevice } from "@/lib/types";
-import { useFocusEffect } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 
 const REFRESH_MS = 500;
 
@@ -20,7 +21,7 @@ const median = (xs: number[]) => {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
 };
 
-export default function DebugScreen() {
+export default function BleDebugScreen() {
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";
   const colors = Colors[colorScheme ?? "light"];
@@ -43,7 +44,7 @@ export default function DebugScreen() {
   useFocusEffect(
     useCallback(() => {
       void loadDevices().then((list) => setDevices(list.filter((d) => !!d.ble_uuids?.ble_service_uuid)));
-      return stop; // 탭을 벗어나면 스캔 중지
+      return stop; // 화면을 벗어나면 스캔 중지
     }, [stop]),
   );
 
@@ -87,59 +88,64 @@ export default function DebugScreen() {
   const elapsedSec = startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0;
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <View style={styles.header}>
-        <Text style={[styles.headerTitle, { color: colors.text }]}>디버그</Text>
+    <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]} edges={["top"]}>
+      <View style={[styles.titleBar, { borderBottomColor: isDark ? "#2a2d2e" : "#e5e7eb" }]}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+          <Text style={[styles.backText, { color: colors.text }]}>‹</Text>
+        </TouchableOpacity>
+        <Text style={[styles.titleText, { color: colors.text }]}>BLE 디버그</Text>
       </View>
 
-      <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { color: colors.icon }]}>RSSI 측정</Text>
-        <View style={styles.btnRow}>
-          <TouchableOpacity
-            style={[styles.btn, { backgroundColor: scanning ? "#ef4444" : "#16a34a" }]}
-            onPress={scanning ? stop : start}
-            disabled={!scanning && devices.length === 0}
-          >
-            <Text style={styles.btnText}>{scanning ? "측정 중지" : "측정 시작"}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.btn, { backgroundColor: cardBg }]} onPress={reset}>
-            <Text style={[styles.btnText, { color: colors.text }]}>초기화</Text>
-          </TouchableOpacity>
+      <ScrollView contentContainerStyle={styles.container}>
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: colors.icon }]}>RSSI 측정</Text>
+          <View style={styles.btnRow}>
+            <TouchableOpacity
+              style={[styles.btn, { backgroundColor: scanning ? "#ef4444" : "#16a34a" }]}
+              onPress={scanning ? stop : start}
+              disabled={!scanning && devices.length === 0}
+            >
+              <Text style={styles.btnText}>{scanning ? "측정 중지" : "측정 시작"}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.btn, { backgroundColor: cardBg }]} onPress={reset}>
+              <Text style={[styles.btnText, { color: colors.text }]}>초기화</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={[styles.hint, { color: colors.icon }]}>
+            {scanning ? `측정 중 · ${elapsedSec}초 경과` : "기준 지점에서 5~10초 측정 후 중앙값을 사용하세요."}
+          </Text>
+          {message && <Text style={styles.error}>{message}</Text>}
         </View>
-        <Text style={[styles.hint, { color: colors.icon }]}>
-          {scanning ? `측정 중 · ${elapsedSec}초 경과` : "기준 지점에서 5~10초 측정 후 중앙값을 사용하세요."}
-        </Text>
-        {message && <Text style={styles.error}>{message}</Text>}
-      </View>
-
-      <View style={styles.section}>
-        <Text style={[styles.sectionTitle, { color: colors.icon }]}>등록된 기기</Text>
-        {devices.length === 0 ? (
-          <Text style={[styles.hint, { color: colors.icon }]}>등록된 기기가 없습니다.</Text>
-        ) : (
-          devices.map((d) => {
-            const samples = samplesRef.current.get((d.ble_uuids.ble_service_uuid as string).toLowerCase()) ?? [];
-            const has = samples.length > 0;
-            return (
-              <View key={d.device_uuid} style={[styles.card, { backgroundColor: cardBg }]}>
-                <View style={styles.cardHead}>
-                  <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
-                    {d.device_nickname || d.device_uuid.substring(0, 8)}
-                  </Text>
-                  <Text style={[styles.role, { color: colors.icon }]}>{ROLE_LABEL[d.role] ?? d.role}</Text>
+  
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: colors.icon }]}>등록된 기기</Text>
+          {devices.length === 0 ? (
+            <Text style={[styles.hint, { color: colors.icon }]}>등록된 기기가 없습니다.</Text>
+          ) : (
+            devices.map((d) => {
+              const samples = samplesRef.current.get((d.ble_uuids.ble_service_uuid as string).toLowerCase()) ?? [];
+              const has = samples.length > 0;
+              return (
+                <View key={d.device_uuid} style={[styles.card, { backgroundColor: cardBg }]}>
+                  <View style={styles.cardHead}>
+                    <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
+                      {d.device_nickname || d.device_uuid.substring(0, 8)}
+                    </Text>
+                    <Text style={[styles.role, { color: colors.icon }]}>{ROLE_LABEL[d.role] ?? d.role}</Text>
+                  </View>
+                  <View style={styles.statRow}>
+                    <Stat label="현재" value={has ? `${samples[samples.length - 1]}` : "-"} color={colors.text} sub={colors.icon} />
+                    <Stat label="중앙값" value={has ? `${median(samples)}` : "-"} color={colors.text} sub={colors.icon} />
+                    <Stat label="최소/최대" value={has ? `${Math.min(...samples)}/${Math.max(...samples)}` : "-"} color={colors.text} sub={colors.icon} />
+                    <Stat label="샘플" value={`${samples.length}`} color={colors.text} sub={colors.icon} />
+                  </View>
                 </View>
-                <View style={styles.statRow}>
-                  <Stat label="현재" value={has ? `${samples[samples.length - 1]}` : "-"} color={colors.text} sub={colors.icon} />
-                  <Stat label="중앙값" value={has ? `${median(samples)}` : "-"} color={colors.text} sub={colors.icon} />
-                  <Stat label="최소/최대" value={has ? `${Math.min(...samples)}/${Math.max(...samples)}` : "-"} color={colors.text} sub={colors.icon} />
-                  <Stat label="샘플" value={`${samples.length}`} color={colors.text} sub={colors.icon} />
-                </View>
-              </View>
-            );
-          })
-        )}
-      </View>
-    </ScrollView>
+              );
+            })
+          )}
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
@@ -153,9 +159,19 @@ function Stat({ label, value, color, sub }: { label: string; value: string; colo
 }
 
 const styles = StyleSheet.create({
+  screen: { flex: 1 },
+  titleBar: {
+    height: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: 8,
+  },
+  backBtn: { paddingRight: 8 },
+  backText: { fontSize: 28, lineHeight: 32 },
+  titleText: { fontSize: 17, fontWeight: "700" },
   container: { padding: 16, gap: 24 },
-  header: { paddingVertical: 8 },
-  headerTitle: { fontSize: 28, fontWeight: "700" },
   section: { gap: 10 },
   sectionTitle: { fontSize: 12, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.8 },
   btnRow: { flexDirection: "row", gap: 10 },
