@@ -97,6 +97,8 @@ android {
         versionName "1.0.0"
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
+        // 초대 App Links 도메인. 실제 값은 저장소 밖 ~/.gradle/gradle.properties의 IOT_INVITE_HOST
+        manifestPlaceholders = [inviteHost: findProperty('IOT_INVITE_HOST') ?: 'your-server.example.com']
     }
     signingConfigs {
         debug {

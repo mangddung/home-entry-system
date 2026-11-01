@@ -9,8 +9,8 @@ export const DEVICE_SETUP_KEY = "device-setup";
 
 export const DEBUG_LOG = "debug-log";
 export const IS_ONLINE_KEY = "is-online";
-export const BACKEND_URL = "https://your-server.example.com";
-//export const BACKEND_URL = "http://192.168.0.10:15895";
+// 실제 주소는 app/.env(git 제외)의 EXPO_PUBLIC_BACKEND_URL. 펌웨어 주소(esp32/generate_config.py)와 짝이다.
+export const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? "https://your-server.example.com";
 
 export const BG_LOCATION_TASK = "BG-Tracking";
 export const BG_GEOFENCE_TASK = "BG-Geofence";

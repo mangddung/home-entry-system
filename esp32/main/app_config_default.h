@@ -37,7 +37,7 @@
 #define MANUFACTURER_UUID_DEFAULT ""
 
 // ── API Server ───────────────────────────────────────────────────────────────
-//#define API_BASE_URL          "http://192.168.0.10:15895"
+// 실제 주소는 generate_config.py가 app_config.h에 넣는다. 앱 주소(app/.env)와 짝이다.
 #define API_BASE_URL          "https://your-server.example.com"
 #define HA_INIT_URL           API_BASE_URL "/iot/init"
 #define HA_VALIDATE_URL       API_BASE_URL "/iot/validate_token"
