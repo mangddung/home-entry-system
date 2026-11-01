@@ -195,7 +195,8 @@ def get_unfigured_devices():
     user_uuid = payload["sub"]
 
     with _db.Session() as session:
-        user_devices = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid).all()
+        # 위치·설정 등록은 master만 가능하므로 master 기기만 안내한다
+        user_devices = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid, role="master").all()
         if not user_devices:
             return jsonify({"status": "success", "data": []}), 200
         device_uuids = [d.device_uuid for d in user_devices]
