@@ -417,7 +417,8 @@ export default function DeviceSetupScreen() {
               disabled={isExpired || isSubmitting}
               onPress={async () => {
                 setIsSubmitting(true);
-                await sendSetupCode(connected, setupDevice!, receivedNonce, setupCode);
+                // 펌웨어가 코드를 소문자로 바꿔 해시하므로 입력도 소문자로 맞춘다
+                await sendSetupCode(connected, setupDevice!, receivedNonce, setupCode.trim().toLowerCase());
                 const device_uuid = await receiveData(connected!, setupDevice!);
                 setDeviceUuid(device_uuid!);
                 const setup = await fetchDeviceSetupToken(device_uuid);

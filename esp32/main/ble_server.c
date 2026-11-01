@@ -328,7 +328,7 @@ static void issue_otp(uint16_t conn_handle)
     s_otp_issued = true;
     snprintf(s_current_otp, sizeof(s_current_otp), "%08" PRIx32 "%08" PRIx32,
              esp_random(), esp_random());
-    ESP_LOGI(TAG, "OTP issued: %s", s_current_otp);
+    ESP_LOGI(TAG, "OTP issued");
 
     auth_timer_start();
 
@@ -489,7 +489,6 @@ static void setup_flow_task(void *arg)
     snprintf(nonce, sizeof(nonce), "%06" PRIx32, rnd);
     setup_notify(nonce);
     ESP_LOGI(TAG, "Setup: nonce     = [%s]", nonce);
-    ESP_LOGI(TAG, "Setup: setup_code = [%s]", SETUP_CODE);
 
     // Step 4: wait for sha256(setup_code + nonce) from app
     if (xQueueReceive(s_setup_queue, &msg, pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS)) != pdTRUE) {
@@ -500,8 +499,6 @@ static void setup_flow_task(void *arg)
     // Step 4: validate sha256(setup_code_lower + nonce)
     char expected[65];
     compute_sha256_hex(SETUP_CODE, nonce, expected);
-    ESP_LOGI(TAG, "Setup: received  = [%s]", msg.data);
-    ESP_LOGI(TAG, "Setup: expected  = [%s]", expected);
     if (strncmp(msg.data, expected, 64) != 0) {
         ESP_LOGW(TAG, "Setup: SHA256 mismatch");
         goto disconnect;

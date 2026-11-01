@@ -13,8 +13,8 @@
 #define IOT_DEVICE_TOKEN_DEFAULT ""
 
 // ── Initial Setup (provisioning) ─────────────────────────────────────────────
-// 기기별 플래시 시 변경할 값
-#define SETUP_CODE           "A1B2C3"        // 6자리 설정 코드 (기기별 고유값)
+// 기기 소유 확인용 설정 코드. generate_config.py가 플래시 때 기기마다 랜덤으로 넣는다.
+#define SETUP_CODE           "CHANGE_ME"
 
 #define SETUP_WIFI_TIMEOUT_MS   20000          // WiFi 연결 대기 타임아웃 (20s)
 #define SETUP_CRED_TIMEOUT_MS   (3 * 60 * 1000) // 자격증명 대기 (3분)

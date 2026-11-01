@@ -45,3 +45,5 @@ Thumbs.db
 *.log
 
 generate_config.py
+# generate_config.py가 기록하는 기기 uuid → 설정 코드
+device_codes.json
