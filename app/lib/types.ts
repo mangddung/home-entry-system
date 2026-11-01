@@ -1,5 +1,8 @@
 import type { Schedule } from "./schedule";
 
+// 제품 모델(서버 통신 경로). Wi-Fi = 상시 전원·HTTP 직접, Zigbee = 게이트웨이 경유
+export type Transport = "wifi" | "zigbee";
+
 export type IoTDevice = {
   device_uuid: string;
   device_nickname: string;
@@ -27,6 +30,8 @@ export type IoTDevice = {
   last_ping_at: Date;
   // 근접 해제 기기 임계값(dBm, 마스터 보정). null이면 첫 발견 즉시 연결. 이전 버전 캐시에는 없을 수 있다
   rssi_threshold?: number | null;
+  // 이전 버전 캐시에는 없다 → Wi-Fi로 본다
+  transport?: Transport;
 };
 
 export type DebugLog = {

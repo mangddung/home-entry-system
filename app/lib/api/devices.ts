@@ -10,7 +10,7 @@ import {
 } from "../constants";
 import { pruneCalibrations } from "../proximity";
 import { getTokenSecure, setTokenSecure } from "../token-storage";
-import type { DeviceStatus, IoTDevice, SetupUuids } from "../types";
+import type { DeviceStatus, IoTDevice, SetupUuids, Transport } from "../types";
 import { getApiErrorMessage } from "./errors";
 
 // DEVICE_STATUS_KEY 읽고-고치고-쓰기는 전부 여기로 보낸다. fn이 돌려준 목록을 그대로 저장한다.
@@ -140,8 +140,8 @@ export const fetchDeviceSetupToken = async (device_uuid: any) => {
       { headers: { Authorization: `Bearer ${access_token}` } },
     );
     const data = response.data.data;
-    const setup_token = data.setup_token;
-    return setup_token;
+    // transport: 서버에 기록된 모델(gen_config). 앱이 셋업 분기를 고르고 광고의 모델 코드와 교차 확인한다
+    return { setup_token: data.setup_token as string, transport: (data.transport ?? "wifi") as Transport };
   } catch (error) {
     return { type: "error", message: getApiErrorMessage(error) };
   }

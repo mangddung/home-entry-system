@@ -8,7 +8,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Buffer } from "buffer";
 import { BleManager, Device, ScanMode } from "react-native-ble-plx";
 import { getTokenSecure } from "./token-storage";
-import { DebugLog, IoTDevice } from "./types";
+import { DebugLog, IoTDevice, Transport } from "./types";
 
 const event_name = "[BLE]";
 
@@ -24,21 +24,45 @@ export const logDebug = async (debugLog: Omit<DebugLog, "timestamp">) => {
   await AsyncStorage.setItem(DEBUG_LOG, JSON.stringify(trimmed));
 };
 
+// Unauthorized·Unknown·Resetting에 머물면 영영 끝나지 않으므로 상한을 둔다(백그라운드 루프가 멈추지 않게)
+const POWER_ON_TIMEOUT_MS = 10000;
 const waitForPoweredOn = (manager: BleManager): Promise<void> =>
   new Promise((resolve, reject) => {
+    let last = "Unknown";
+    const timer = setTimeout(() => {
+      sub.remove();
+      reject(new Error(`BLE 상태: ${last} (${POWER_ON_TIMEOUT_MS / 1000}초 동안 켜지지 않음)`));
+    }, POWER_ON_TIMEOUT_MS);
     const sub = manager.onStateChange((state) => {
+      last = state;
       if (state === "PoweredOn") {
+        clearTimeout(timer);
         sub.remove();
         resolve();
       } else if (state === "PoweredOff" || state === "Unsupported") {
+        clearTimeout(timer);
         sub.remove();
         reject(new Error(`BLE 상태: ${state}`));
       }
     }, true);
   });
 
+// 광고 manufacturer data = [company ID 0x02E5 little-endian][모델 코드 1=Wi-Fi, 2=Zigbee] (esp32/main/ble_server.c)
+// 펌웨어가 모델 코드를 싣기 전 기기는 null
+export const advertisedModel = (device: Device): Transport | null => {
+  if (!device.manufacturerData) return null;
+  const b = Buffer.from(device.manufacturerData, "base64");
+  if (b.length < 3 || b[0] !== 0xe5 || b[1] !== 0x02) return null;
+  return b[2] === 2 ? "zigbee" : b[2] === 1 ? "wifi" : null;
+};
+
+// 진행 중인 scanDevice를 끝낸다(타임아웃 해제 + 결과 반환). 타임아웃을 남겨 두면 나중에 다른 스캔을 멈춘다.
+let finishActiveScan: (() => void) | null = null;
+
 export const stopScan = () => {
-  if (isScanning) {
+  if (finishActiveScan) {
+    finishActiveScan();
+  } else if (isScanning) {
     manager.stopDeviceScan();
     isScanning = false;
   }
@@ -368,7 +392,6 @@ export const sendWifiSetup = async (
   wifi_pw: any,
   setup_token: any,
 ) => {
-  const bleUuids = ioTDevice.ble_uuids;
   // 펌웨어는 세 필드 모두 문자열이어야 파싱한다. 하나라도 문자열이 아니면
   // JSON 자체는 유효해서 cJSON_Parse를 통과한 뒤 "missing JSON fields"로 죽는다.
   if (
@@ -384,11 +407,21 @@ export const sendWifiSetup = async (
     });
     return false;
   }
-  const payload = {
+  return writeSetupPayload(connected, ioTDevice, {
     setup_token: setup_token,
     wifi_ssid: wifi_ssid,
     wifi_pw: wifi_pw,
-  };
+  });
+};
+
+// Zigbee 모델: Wi-Fi 정보 없이 셋업 토큰만 보낸다. 기기는 게이트웨이 네트워크에 가입해 서버에 확인한다.
+export const sendZigbeeSetup = async (connected: any, ioTDevice: IoTDevice, setup_token: string) => {
+  if (!setup_token) return false;
+  return writeSetupPayload(connected, ioTDevice, { setup_token });
+};
+
+const writeSetupPayload = async (connected: any, ioTDevice: IoTDevice, payload: Record<string, string>) => {
+  const bleUuids = ioTDevice.ble_uuids;
   const encodedData = Buffer.from(JSON.stringify(payload), "utf-8").toString("base64");
   logDebug({
     event_name: event_name,

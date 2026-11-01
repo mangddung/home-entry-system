@@ -15,6 +15,7 @@ import {
 } from "@/lib/constants";
 import { checkAuthToken, getTokenSecure, setTokenSecure } from "@/lib/token-storage";
 import { IoTDevice } from "@/lib/types";
+import { ModelIcon } from "@/components/model-icon";
 import { Provider } from "@ant-design/react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useIsFocused } from "@react-navigation/native";
@@ -265,6 +266,7 @@ export default function HomeScreen() {
                         <Text style={[styles.roleChipText, { color: roleAccent.pillColor }]}>{roleAccent.label}</Text>
                       </View>
                       <View style={styles.pingRow}>
+                        <ModelIcon transport={device.transport} size={12} color={colors.icon} />
                         <View style={[styles.pingDot, { backgroundColor: pingColor }]} />
                         <Text style={[styles.pingLabel, { color: pingColor }]}>{pingLabel}</Text>
                       </View>

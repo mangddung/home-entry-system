@@ -21,6 +21,7 @@ import { DEVICES_REFRESHED_EVENT, GEOFENCE_RADIUS_M, IS_ONLINE_KEY, SELECTED_DEV
 import type { ScheduleWindow } from "@/lib/schedule";
 import { getTokenSecure } from "@/lib/token-storage";
 import { MemberInfo, type IoTDevice } from "@/lib/types";
+import { MODEL_LABEL, ModelIcon } from "@/components/model-icon";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useIsFocused } from "@react-navigation/native";
 import Clipboard from "@react-native-clipboard/clipboard";
@@ -1299,6 +1300,12 @@ export default function DeviceInfoView() {
               <Text style={[styles.rolePillText, { color: myRole.color }]}>{myRole.label}</Text>
             </View>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <View style={styles.deviceStatus}>
+                <ModelIcon transport={device.transport} size={13} color={colors.tabIconDefault} />
+                <Text style={[styles.deviceStatusText, { color: colors.tabIconDefault }]}>
+                  {MODEL_LABEL[device.transport ?? "wifi"]}
+                </Text>
+              </View>
               <View style={styles.deviceStatus}>
                 <View style={[styles.pingDot, { backgroundColor: pingColor }]} />
                 <Text style={[styles.deviceStatusText, { color: colors.tabIconDefault }]}>

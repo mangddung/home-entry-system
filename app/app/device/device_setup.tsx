@@ -2,12 +2,13 @@ import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { showAlert } from "@/lib/alert";
 import { fetchDeviceSetupToken, fetchSetupUuid, loadDevices } from "@/lib/api/devices";
-import { connectDevice, receiveData, scanDevice, sendSetupCode, sendWifiSetup, stopScan, triggerPairing } from "@/lib/ble";
+import { advertisedModel, connectDevice, receiveData, scanDevice, sendSetupCode, sendWifiSetup, sendZigbeeSetup, stopScan, triggerPairing } from "@/lib/ble";
 import { commitBond, dropPendingBond, markPendingBond, resetBond } from "@/lib/bond";
 import NetInfo from "@react-native-community/netinfo";
 import { DEVICE_SETUP_KEY, MAX_DEVICES_PER_USER, UNFIGURED_DEVICES_KEY } from "@/lib/constants";
 import { getTokenSecure, setTokenSecure } from "@/lib/token-storage";
-import { IoTDevice } from "@/lib/types";
+import { IoTDevice, Transport } from "@/lib/types";
+import { MODEL_LABEL, ModelIcon } from "@/components/model-icon";
 import { scanWifi24GHz, WifiNetwork } from "@/lib/wifi";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
@@ -88,6 +89,13 @@ function wifiFailMessage(code: string): string {
   return "Wi-Fi에 연결하지 못했습니다.\n\nWi-Fi 이름과 비밀번호를 확인해 주세요. 기기는 2.4GHz Wi-Fi만 지원합니다.";
 }
 
+// Zigbee 모델 펌웨어가 보내는 ZB_FAIL:<사유> 코드를 안내 문구로 변환
+function zigbeeFailMessage(code: string): string {
+  if (code === "ZB_FAIL:JOIN")
+    return "게이트웨이 네트워크를 찾지 못했습니다.\n\n게이트웨이가 켜져 있는지 확인하고 기기를 게이트웨이 가까이에 두고 다시 시도해 주세요.";
+  return "서버 응답을 받지 못했습니다.\n\n게이트웨이의 인터넷 연결을 확인하고 잠시 후 다시 시도해 주세요.";
+}
+
 export default function DeviceSetupScreen() {
   const scheme = useColorScheme();
   const colors = Colors[scheme ?? "light"];
@@ -107,6 +115,9 @@ export default function DeviceSetupScreen() {
   const disconnectIntentional = useRef(false);
   const [deviceUuid, setDeviceUuid] = useState("");
   const [setupToken, setSetupToken] = useState("");
+  const [transport, setTransport] = useState<Transport>("wifi");
+  // 연결한 기기가 광고한 모델(펌웨어가 원천). 서버 기록과 교차 확인한다
+  const advModelRef = useRef<Transport | null>(null);
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -245,7 +256,7 @@ export default function DeviceSetupScreen() {
   // 목록을 못 띄우는 환경(iOS·권한 거부 등)에서만 현재 연결된 SSID를 자동 입력한다.
   // 목록이 있으면 사용자가 직접 고르므로 자동 입력하지 않는다.
   useEffect(() => {
-    if (proccess !== 3) return;
+    if (proccess !== 3 || transport === "zigbee") return;
     void (async () => {
       const result = await refreshWifiList();
       if (result.ok && result.networks.length > 0) return;
@@ -254,7 +265,7 @@ export default function DeviceSetupScreen() {
         setWifiSsid(state.details.ssid);
       }
     })();
-  }, [proccess, refreshWifiList]);
+  }, [proccess, transport, refreshWifiList]);
 
   // 셋업 코드 입력 타이머
   useEffect(() => {
@@ -271,6 +282,24 @@ export default function DeviceSetupScreen() {
     }, 1000);
     return () => clearInterval(timerRef.current!);
   }, [receivedNonce]);
+
+  // 기기가 보낸 최종 결과(REGISTERED / WIFI_FAIL:* / ZB_FAIL:* / TOKEN_FAIL) 처리. Wi-Fi·Zigbee 공용
+  const finishRegistration = async (apiResponse: string | null) => {
+    if (apiResponse == "REGISTERED") {
+      await commitBond(deviceUuid);
+      const device = [{ device_uuid: deviceUuid, type: "location" }];
+      await setTokenSecure(UNFIGURED_DEVICES_KEY, JSON.stringify(device));
+      router.push("/device/location-setup");
+    } else if (apiResponse?.startsWith("WIFI_FAIL")) {
+      showAlert("Wi-Fi 연결 실패", wifiFailMessage(apiResponse), [{ text: "확인" }]);
+    } else if (apiResponse?.startsWith("ZB_FAIL")) {
+      showAlert("게이트웨이 연결 실패", zigbeeFailMessage(apiResponse), [{ text: "확인" }]);
+    } else {
+      showAlert("설정 실패", "기기 등록에 실패했습니다. 잠시 후 다시 시도해 주세요.", [
+        { text: "확인" },
+      ]);
+    }
+  };
 
   // setup 코드 입력 뷰
   if (proccess == 2) {
@@ -391,15 +420,26 @@ export default function DeviceSetupScreen() {
                 await sendSetupCode(connected, setupDevice!, receivedNonce, setupCode);
                 const device_uuid = await receiveData(connected!, setupDevice!);
                 setDeviceUuid(device_uuid!);
-                const setup_token = await fetchDeviceSetupToken(device_uuid);
+                const setup = await fetchDeviceSetupToken(device_uuid);
                 setIsSubmitting(false);
-                if (typeof setup_token !== "string" || !setup_token) {
+                if (!("setup_token" in setup) || typeof setup.setup_token !== "string" || !setup.setup_token) {
                   showAlert("설정 실패", "설정 토큰을 받지 못했습니다. 다시 시도해 주세요.", [
                     { text: "확인" },
                   ]);
                   return;
                 }
-                setSetupToken(setup_token);
+                // 기기가 광고한 모델(펌웨어)과 서버 기록(gen_config)이 다르면 잘못 설정된 기기다
+                const adv = advModelRef.current;
+                if (adv && adv !== setup.transport) {
+                  showAlert(
+                    "모델 정보 불일치",
+                    `기기는 ${MODEL_LABEL[adv]} 모델로 동작하지만 서버에는 ${MODEL_LABEL[setup.transport]} 모델로 등록되어 있습니다. 기기를 다시 설정해 주세요.`,
+                    [{ text: "확인" }],
+                  );
+                  return;
+                }
+                setSetupToken(setup.setup_token);
+                setTransport(setup.transport);
                 setProcces(3);
               }}
             >
@@ -411,6 +451,86 @@ export default function DeviceSetupScreen() {
             </TouchableOpacity>
           </ScrollView>
         </KeyboardAvoidingView>
+      </SafeAreaView>
+    );
+  }
+
+  // Zigbee 모델: Wi-Fi 입력 없이 게이트웨이 네트워크 가입 + 서버 등록
+  if (proccess == 3 && transport === "zigbee") {
+    return (
+      <SafeAreaView
+        style={[styles.formContainer, { backgroundColor: colors.background }]}
+        edges={["top"]}
+      >
+        <View style={styles.pageHeaderRow}>
+          <Text style={[styles.pageTitle, { color: colors.text }]}>기기 추가</Text>
+          <View
+            style={[
+              styles.stepBadge,
+              {
+                backgroundColor: isDark ? "rgba(10,126,164,0.15)" : "#EFF8FC",
+                borderColor: isDark ? "rgba(10,126,164,0.3)" : "#BAE6F7",
+              },
+            ]}
+          >
+            <Text style={[styles.stepText, { color: colors.tint }]}>3 / 3</Text>
+          </View>
+        </View>
+
+        <ScrollView contentContainerStyle={styles.formScroll} showsVerticalScrollIndicator={false}>
+          <View style={styles.formHero}>
+            <View
+              style={[
+                styles.iconCircle,
+                {
+                  backgroundColor: isDark ? "rgba(10,126,164,0.15)" : "#EFF8FC",
+                  borderColor: isDark ? "rgba(10,126,164,0.3)" : "#BAE6F7",
+                },
+              ]}
+            >
+              <ModelIcon transport="zigbee" size={38} color={colors.tint} />
+            </View>
+            <Text style={[styles.formTitle, { color: colors.text }]}>게이트웨이 연결</Text>
+            <Text style={[styles.formSub, { color: colors.tabIconDefault }]}>
+              {isSubmitting
+                ? "기기가 게이트웨이에 가입하고 서버에 등록하는 중입니다 (최대 2분)"
+                : "게이트웨이가 켜져 있는지 확인한 뒤 연결을 눌러 주세요"}
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            style={[
+              styles.submitButton,
+              { backgroundColor: "#3B82F6", opacity: isSubmitting ? 0.7 : 1 },
+            ]}
+            disabled={isSubmitting}
+            onPress={async () => {
+              setIsSubmitting(true);
+              // 다시 시도할 때 게이트웨이 가입 허용 시간(180초)이 지났을 수 있어 토큰을 다시 받아 가입을 다시 연다
+              const setup = await fetchDeviceSetupToken(deviceUuid);
+              const token = "setup_token" in setup && setup.setup_token ? setup.setup_token : setupToken;
+              const sent = await sendZigbeeSetup(connected, setupDevice!, token);
+              if (!sent) {
+                setIsSubmitting(false);
+                showAlert("설정 실패", "기기로 설정 정보를 보내지 못했습니다.", [{ text: "확인" }]);
+                return;
+              }
+              const receiveResponse = await receiveData(connected!, setupDevice!);
+              if (receiveResponse != "ACK") {
+                console.log("not received");
+              }
+              const apiResponse = await receiveData(connected!, setupDevice!);
+              setIsSubmitting(false);
+              await finishRegistration(apiResponse);
+            }}
+          >
+            {isSubmitting ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.submitText}>연결</Text>
+            )}
+          </TouchableOpacity>
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -630,18 +750,7 @@ export default function DeviceSetupScreen() {
                 }
                 const apiResponse = await receiveData(connected!, setupDevice!);
                 setIsSubmitting(false);
-                if (apiResponse == "REGISTERED") {
-                  await commitBond(deviceUuid);
-                  const device = [{ device_uuid: deviceUuid, type: "location" }];
-                  await setTokenSecure(UNFIGURED_DEVICES_KEY, JSON.stringify(device));
-                  router.push("/device/location-setup");
-                } else if (apiResponse?.startsWith("WIFI_FAIL")) {
-                  showAlert("Wi-Fi 연결 실패", wifiFailMessage(apiResponse), [{ text: "확인" }]);
-                } else {
-                  showAlert("설정 실패", "기기 등록에 실패했습니다. 잠시 후 다시 시도해 주세요.", [
-                    { text: "확인" },
-                  ]);
-                }
+                await finishRegistration(apiResponse);
               }}
             >
               {isSubmitting ? (
@@ -796,6 +905,7 @@ export default function DeviceSetupScreen() {
                     );
                     return;
                   }
+                  advModelRef.current = advertisedModel(d);
                   await markPendingBond(d.id);
                   await triggerPairing(conn, setupDevice);
                   const nonce = await receiveData(conn, setupDevice);
@@ -819,9 +929,14 @@ export default function DeviceSetupScreen() {
                     <MaterialCommunityIcons name="bluetooth" size={16} color={colors.tint} />
                   </View>
                   <View style={styles.deviceInfo}>
-                    <Text style={[styles.deviceName, { color: colors.text }]} numberOfLines={1}>
-                      {d.name ?? d.localName ?? "이름 없음"}
-                    </Text>
+                    <View style={styles.deviceNameRow}>
+                      <Text style={[styles.deviceName, { color: colors.text }]} numberOfLines={1}>
+                        {d.name ?? d.localName ?? "이름 없음"}
+                      </Text>
+                      {advertisedModel(d) && (
+                        <ModelIcon transport={advertisedModel(d)} size={14} color={colors.tabIconDefault} />
+                      )}
+                    </View>
                     <Text
                       style={[styles.deviceId, { color: colors.tabIconDefault }]}
                       numberOfLines={1}
@@ -1120,7 +1235,13 @@ const styles = StyleSheet.create({
     flex: 1,
     gap: 3,
   },
+  deviceNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
   deviceName: {
+    flexShrink: 1,
     fontSize: 15,
     fontWeight: "600",
   },
