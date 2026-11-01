@@ -8,10 +8,6 @@ graphify-out/
 *.pyc
 mvp/
 *.lnk
-# 개인 스크린샷: 기기 UUID·초대 코드·위치가 찍힘
-docs/*.jpg
-docs/*.png
-docs/poster.html
 # 서버 도메인·EAS ID·Firebase 키: app/app.json.example을 복사해 쓴다
 app/app.json
 app/android/app/google-services.json
@@ -21,3 +17,5 @@ gateway/z2m/node_modules/
 gateway/z2m/data/*
 !gateway/z2m/data/external_converters/
 gateway/z2m/data/external_converters/node_modules
+# 개인 자료(스크린샷·포스터·백업·양식): 기기 UUID·초대 코드·위치·학번이 들어 있다
+docs/
