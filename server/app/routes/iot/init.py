@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import secrets
 import uuid
 from flask import Blueprint, request, jsonify
+from flask_limiter.util import get_remote_address
 import jwt
 
 from app.utils.database import database as _db
@@ -56,6 +57,16 @@ def _decode_device_token(token: str) -> dict | None:
         session.commit()
 
     return payload
+
+
+def _device_rate_key() -> str:
+    """유효한 기기 토큰이면 기기별로 센다. 프록시 뒤에서는 모든 기기의 IP가 같아서
+    IP로 세면 한 기기의 요청 폭주가 다른 기기의 문 열기까지 막는다."""
+    try:
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+        return jwt.decode(token, os.environ["JWT_SECRET"], algorithms=["HS256"])["sub"]
+    except (jwt.PyJWTError, KeyError):
+        return get_remote_address()
 
 
 def _notify_auth_denied(session, user_uuid, device_uuid, reason):
@@ -118,7 +129,7 @@ def notify_power_on(device_uuid: str, master_nickname: str):
 
 # POST /iot/validate_token
 @iot_bp.route("/validate_token", methods=["POST"])
-@limiter.limit("20/minute")
+@limiter.limit("20/minute", key_func=_device_rate_key)
 def iot_validate_token():
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
