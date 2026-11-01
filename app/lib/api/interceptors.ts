@@ -38,12 +38,12 @@ async function clearSession() {
 let isHandling401 = false;
 
 // 동시에 401을 받은 요청들이 refresh를 각각 호출하지 않도록 한 번만 수행하고 결과를 공유한다.
-let refreshPromise: Promise<boolean> | null = null;
+let refreshPromise: Promise<string> | null = null;
 
-async function refreshOnce(): Promise<boolean> {
+async function refreshOnce(): Promise<string> {
   if (!refreshPromise) {
     refreshPromise = refreshToken()
-      .then((result) => result.type === "success")
+      .then((result) => result.type)
       .finally(() => {
         refreshPromise = null;
       });
@@ -60,13 +60,16 @@ export function setupAxiosInterceptors() {
 
       if (error.response?.status === 401 && config && !config._retried && !isRefreshCall) {
         config._retried = true;
-        if (await refreshOnce()) {
+        const refreshed = await refreshOnce();
+        if (refreshed === "success") {
           const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
           if (access_token) {
             config.headers = { ...config.headers, Authorization: `Bearer ${access_token}` };
           }
           return axios(config);
         }
+        // 서버 장애·네트워크 오류면 세션을 유지한다. 지우면 BLE 키도 사라져 재로그인 전까지 문을 못 연다.
+        if (refreshed === "error") return Promise.reject(error);
       }
 
       if (error.response?.status === 401 && !isHandling401) {

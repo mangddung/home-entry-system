@@ -69,7 +69,27 @@ export const refreshToken = async () => {
     await setTokenSecure(USER_REFRESH_TOKEN_KEY, new_refresh);
     return { type: "success", message: "토큰이 갱신되었습니다." };
   } catch (error) {
-    return { type: "error", message: getApiErrorMessage(error) };
+    // 401/403만 세션이 무효라는 뜻이다. 네트워크 오류·5xx·429로 세션을 지우면 안 된다(interceptors.ts).
+    const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+    return {
+      type: status === 401 || status === 403 ? "forbidden" : "error",
+      message: getApiErrorMessage(error),
+    };
+  }
+};
+
+// 카카오 콜백이 준 일회용 코드를 토큰으로 바꾼다. verifier는 로그인을 시작한 앱만 안다.
+export const exchangeKakaoCode = async (code: string, verifier: string) => {
+  try {
+    const { data } = await axios.post(`${BACKEND_URL}/auth/kakao/exchange`, { code, verifier }, { timeout: 10000 });
+    return {
+      type: "success" as const,
+      access_token: data.access_token as string,
+      refresh_token: data.refresh_token as string,
+      user_uuid: data.user_uuid as string,
+    };
+  } catch (error) {
+    return { type: "error" as const, message: getApiErrorMessage(error) };
   }
 };
 
