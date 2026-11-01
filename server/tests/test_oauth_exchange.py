@@ -21,7 +21,7 @@ _db.init_db()
 
 import jwt
 from flask import Flask
-from app.utils.database.models import OAuthLoginCode
+from app.utils.database.models import OAuthLoginCode, User
 from app.routes.client import oauth
 
 
@@ -92,5 +92,13 @@ print("[ok] 만료된 코드는 거부된다")
 
 assert c.post("/auth/kakao/exchange", json={"code": 1, "verifier": None}).status_code == 400
 print("[ok] 형식이 틀린 요청은 거부된다")
+
+oauth.requests.get = lambda *a, **k: FakeResponse({"id": 43, "properties": {"nickname": "tester"}})
+r = exchange(login())
+assert r.status_code == 200, r.data
+with _db.Session() as s:
+    names = sorted(u.user_name for u in s.query(User))
+assert names == ["tester", "tester_43"], names
+print("[ok] 닉네임이 같은 다른 카카오 사용자도 가입할 수 있다")
 
 print("\n전체 통과")

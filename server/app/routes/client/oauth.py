@@ -79,9 +79,11 @@ def kakao_callback():
         oauth_row = session.query(KakaoOAuthToken).filter_by(kakao_user_id=kakao_user_id).first()
 
         if oauth_row is None:
+            # user_name은 unique인데 카카오 닉네임은 겹칠 수 있다. 겹치면 유일한 카카오 ID를 붙인다.
+            name_taken = session.query(User).filter_by(user_name=kakao_name).first() is not None
             new_user = User(
                 user_uuid  = str(uuid.uuid4()),
-                user_name  = kakao_name,
+                user_name  = f"{kakao_name}_{kakao_user_id}" if name_taken else kakao_name,
                 secret_key = "",
             )
             session.add(new_user)
