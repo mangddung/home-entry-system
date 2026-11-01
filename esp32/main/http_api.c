@@ -285,6 +285,9 @@ typedef struct {
     char nonce[17];   // 16-hex-char OTP + NUL
 } validate_args_t;
 
+// 검증은 동시에 1건만 돌린다. 9KB 스택에 TLS까지 쓰는 태스크가 쌓이면 힙이 고갈된다.
+static volatile bool s_validating = false;
+
 static void task_validate_token(void *arg)
 {
     validate_args_t *a = (validate_args_t *)arg;
@@ -294,6 +297,7 @@ static void task_validate_token(void *arg)
     if (!body) {
         ESP_LOGE(TAG, "OOM for validate body");
         free(a);
+        s_validating = false;
         vTaskDelete(NULL);
         return;
     }
@@ -307,6 +311,7 @@ static void task_validate_token(void *arg)
     if (n < 0 || (size_t)n >= body_size) {
         ESP_LOGE(TAG, "validate body truncated – aborting");
         free(body);
+        s_validating = false;
         vTaskDelete(NULL);
         return;
     }
@@ -326,6 +331,11 @@ static void task_validate_token(void *arg)
             .crt_bundle_attach     = esp_crt_bundle_attach,
         };
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
+        if (!client) {
+            ESP_LOGE(TAG, "HTTP client init failed");
+            status = 0;
+            break;
+        }
         esp_http_client_set_header(client, "Content-Type",  "application/json");
         esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
         esp_http_client_set_header(client, "Authorization", auth_header);
@@ -370,6 +380,7 @@ static void task_validate_token(void *arg)
             led_notify_fail();
             break;
     }
+    s_validating = false;
     vTaskDelete(NULL);
 }
 
@@ -507,6 +518,10 @@ void http_fetch_iot_init(void)
 void http_request_validate_token(const char *encrypted_token,
                                   const char *nonce)
 {
+    if (s_validating) {
+        ESP_LOGW(TAG, "Token validation already running – request dropped");
+        return;
+    }
     validate_args_t *a = malloc(sizeof(validate_args_t));
     if (!a) {
         ESP_LOGE(TAG, "OOM for validate_args");
@@ -514,7 +529,12 @@ void http_request_validate_token(const char *encrypted_token,
     }
     strlcpy(a->encrypted_token, encrypted_token, sizeof(a->encrypted_token));
     strlcpy(a->nonce,           nonce,           sizeof(a->nonce));
-    xTaskCreate(task_validate_token, "http_val", 9216, a, 5, NULL);
+    s_validating = true;
+    if (xTaskCreate(task_validate_token, "http_val", 9216, a, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "validate task create failed");
+        s_validating = false;
+        free(a);
+    }
 }
 
 void http_start_ping_task(void)

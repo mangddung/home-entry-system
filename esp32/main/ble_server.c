@@ -155,16 +155,30 @@ static int chr_notify_access(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
+static bool is_hex(const char *s, uint16_t len)
+{
+    for (uint16_t i = 0; i < len; i++) {
+        if (!isxdigit((unsigned char)s[i])) return false;
+    }
+    return true;
+}
+
 static void process_write_payload(const char *msg, uint16_t len)
 {
-    auth_timer_stop();
-
-    // Payload format: "<mac>" (hex 64자, HMAC-SHA256(user key, nonce + auth_token)). user_uuid는 보내지 않는다.
-    if (len != 64) {
-        ESP_LOGE(TAG, "MAC length invalid (%u)", len);
+    // OTP가 없으면(구독 전·소진·만료) 서버로 보내지 않는다. 인증 없이 쓸 수 있는 특성이라
+    // 막지 않으면 쓰기 폭주가 HTTP 태스크와 서버 요청 제한을 소모한다.
+    if (s_current_otp[0] == '\0') {
+        ESP_LOGW(TAG, "Write without valid OTP – ignored");
         return;
     }
 
+    // Payload format: "<mac>" (hex 64자, HMAC-SHA256(user key, nonce + auth_token)). user_uuid는 보내지 않는다.
+    if (len != 64 || !is_hex(msg, len)) {
+        ESP_LOGE(TAG, "MAC format invalid (%u bytes)", len);
+        return;
+    }
+
+    auth_timer_stop();
     ESP_LOGI(TAG, "Format OK (%u bytes)", len);
 
     char nonce[sizeof(s_current_otp)];
