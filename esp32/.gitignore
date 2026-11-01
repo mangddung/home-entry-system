@@ -5,6 +5,7 @@ Bluedroid_Beacon
 
 # Build artifacts
 build/
+build_*/
 *.bin
 *.elf
 *.map
@@ -12,6 +13,11 @@ build/
 *.a
 sdkconfig
 sdkconfig.old
+# 모델별 생성 sdkconfig (gen_config: -D SDKCONFIG=sdkconfig.<model>)
+sdkconfig.wifi
+sdkconfig.wifi.old
+sdkconfig.zigbee
+sdkconfig.zigbee.old
 
 # ESP-IDF component manager
 managed_components/

@@ -1,0 +1,29 @@
+# 개발용 Zigbee 게이트웨이(Zigbee2MQTT 2.14.2 + Sonoff ZBDongle-P) 설정.
+# gateway/setup_dev_gateway.ps1이 data/configuration.yaml로 복사한다. Z2M이 첫 실행 때 네트워크 키를 써넣으므로
+# data/configuration.yaml은 커밋하지 않는다(.gitignore).
+version: 5
+homeassistant:
+  enabled: false
+frontend:
+  enabled: true
+  host: 127.0.0.1   # 같은 PC에서만 (프론트엔드도 외부 JS 업로드가 가능하다)
+  port: 15880
+mqtt:
+  base_topic: homes/gw-dev        # 서버는 homes/<gateway_id>/... 로 게이트웨이를 구분한다
+  server: mqtt://127.0.0.1:15883  # docker-compose*.yml의 Mosquitto
+  user: gw-dev                    # 사용자명 = gateway_id (Mosquitto ACL pattern homes/%u/#)
+  password: '!secret mqtt_password'
+  include_device_information: true  # 서버가 friendly name이 아니라 device.ieeeAddr로 기기를 식별한다
+serial:
+  port: COM_PORT                  # setup_dev_gateway.ps1이 채운다
+  adapter: zstack
+advanced:
+  channel: 25                     # Wi-Fi 채널과 겹치지 않는 15/20/25 중 하나
+  network_key: GENERATE
+  pan_id: GENERATE
+  ext_pan_id: GENERATE
+  # 상태 캐시를 끈다: 켜면 이전 doorlock_req가 다음 상태 발행에 다시 실려 서버가 같은 요청을 또 받는다
+  cache_state: false
+  log_level: info
+availability:
+  enabled: false

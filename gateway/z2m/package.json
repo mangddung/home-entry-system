@@ -1,0 +1,11 @@
+{
+  "name": "doorlock-z2m-dev-gateway",
+  "private": true,
+  "description": "개발용 Zigbee 게이트웨이(Sonoff ZBDongle-P). 설치는 npm ci, 실행은 npm start",
+  "scripts": {
+    "start": "node start.cjs"
+  },
+  "dependencies": {
+    "zigbee2mqtt": "2.14.2"
+  }
+}

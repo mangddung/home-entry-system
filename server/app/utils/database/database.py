@@ -45,11 +45,19 @@ def init_db():
         ("setup_user_uuid",    "ALTER TABLE device_management ADD COLUMN setup_user_uuid VARCHAR(50)"),
         ("setup_requested_at", "ALTER TABLE device_management ADD COLUMN setup_requested_at DATETIME"),
         ("rssi_threshold",     "ALTER TABLE device_management ADD COLUMN rssi_threshold INTEGER"),
+        # Zigbee 모델 추가: 기존 기기는 모두 Wi-Fi 모델
+        ("transport",  "ALTER TABLE device_management ADD COLUMN transport VARCHAR(10) NOT NULL DEFAULT 'wifi'"),
+        ("ieee_addr",  "ALTER TABLE device_management ADD COLUMN ieee_addr VARCHAR(18)"),
+        ("gateway_id", "ALTER TABLE device_management ADD COLUMN gateway_id VARCHAR(50)"),
     ):
         if col not in existing_device_cols:
             with engine.connect() as conn:
                 conn.execute(text(ddl))
                 conn.commit()
+    # SQLite는 ADD COLUMN에 UNIQUE를 못 붙여 인덱스로 건다(새 DB는 create_all이 이미 만든 상태)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_device_management_ieee_addr ON device_management (ieee_addr)"))
+        conn.commit()
 
     # geofence 반경은 앱에서 상수로 고정되어 더 이상 저장하지 않는다.
     # 컬럼이 NOT NULL로 남아 있으면 모델에서 빠진 뒤 INSERT가 실패하므로 제거한다.

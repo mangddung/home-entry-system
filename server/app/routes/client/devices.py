@@ -14,7 +14,8 @@ from app.utils.database import UserDeviceMapping, DeviceManagement, UserToken
 from app.utils.database.models import DeviceLocation, Settings, User
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
-from app.utils.device_utils import SETUP_CLAIM_TTL
+from app.utils.device_utils import SETUP_CLAIM_TTL, hw_fields
+from app.utils.mqtt_utils import open_zigbee_join
 from app.routes.client.auth import verify_access_token
 
 client_bp = Blueprint("client", __name__, url_prefix="/client")
@@ -108,6 +109,7 @@ def get_user_devices():
                 } if m.device.location else None,
                 "last_ping_at": m.device.last_ping_at.isoformat() + "Z" if m.device.last_ping_at else None,
                 "rssi_threshold": m.device.rssi_threshold,
+                "transport": m.device.transport,
             }
             for m in mappings
         ]
@@ -170,9 +172,18 @@ def get_setup_token():
         if not claimed:
             return jsonify({"status": "error", "message": "setup in progress by another user"}), 409
         session.commit()
+        transport = device.transport
+        setup_token = device.setup_token
+        registered = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first() is not None
 
-        log_activity("device_setup_token_served", user_uuid=user_uuid, device_uuid=device_uuid)
-        return jsonify({"status": "success", "data": {"setup_token": device.setup_token}}), 200
+    # Zigbee 모델은 기기가 이제 게이트웨이 네트워크에 가입해야 한다(앱이 곧 셋업 토큰을 BLE로 넘긴다).
+    # 이미 등록된 기기로는 열지 않는다(아무 device_uuid로 가입 창을 여는 것을 막는다).
+    if transport == "zigbee" and not registered:
+        open_zigbee_join()
+
+    log_activity("device_setup_token_served", user_uuid=user_uuid, device_uuid=device_uuid)
+    # transport: 앱이 셋업 분기(Wi-Fi 입력 / Zigbee)를 고르고 광고의 모델 코드와 교차 확인한다
+    return jsonify({"status": "success", "data": {"setup_token": setup_token, "transport": transport}}), 200
 
 # GET /client/unfigured-devices
 @client_bp.route("/unfigured-devices", methods=["GET"])
@@ -338,6 +349,8 @@ def delete_device():
             "ble_read_uuid": device.ble_read_uuid,
             "ble_write_uuid": device.ble_write_uuid,
             "ble_manufacturer_uuid": device.ble_manufacturer_uuid,
+            **hw_fields(device),
+            "gateway_id": None,  # 미등록이 되면 게이트웨이 묶음을 푼다(다음 셋업에서 다시 묶인다)
         }
 
         session.delete(device)

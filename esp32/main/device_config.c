@@ -1,6 +1,7 @@
 #include "device_config.h"
 #include "ble_server.h"
 #include "app_config.h"
+#include "transport.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_system.h"
@@ -138,7 +139,9 @@ void device_config_load(void)
     if (has_nvs) nvs_close(h);
 
     // BLE UUIDs: JWT payload → NVS → hardcoded defaults
-    if (!load_ble_from_token(g_cfg.device_token)) {
+    // Zigbee 모델은 기기 JWT를 쓰지 않는다(셋업 때 서버가 Zigbee로 UUID를 내려줘 NVS에 저장).
+    // app_config.h의 초기 토큰이 NVS 값을 덮지 않도록 JWT 단계를 건너뛴다.
+    if (TRANSPORT_IS_ZIGBEE || !load_ble_from_token(g_cfg.device_token)) {
         bool ble_from_nvs = false;
         nvs_handle_t bh;
         if (nvs_open(NVS_NS, NVS_READONLY, &bh) == ESP_OK) {
@@ -184,8 +187,8 @@ void device_config_set_refresh_token(const char *refresh_token)
     ESP_LOGI(TAG, "refresh token updated");
 }
 
-void device_config_update_ble(const char *svc, const char *read,
-                               const char *write, const char *mfr)
+void device_config_save_ble(const char *svc, const char *read,
+                             const char *write, const char *mfr)
 {
     nvs_handle_t h;
     ESP_ERROR_CHECK(nvs_open(NVS_NS, NVS_READWRITE, &h));
@@ -195,20 +198,29 @@ void device_config_update_ble(const char *svc, const char *read,
     nvs_set_str(h, "mfr_uuid",  mfr);
     nvs_commit(h);
     nvs_close(h);
+    ESP_LOGI(TAG, "BLE UUIDs saved");
+}
+
+void device_config_update_ble(const char *svc, const char *read,
+                               const char *write, const char *mfr)
+{
+    device_config_save_ble(svc, read, write, mfr);
     ESP_LOGI(TAG, "BLE UUIDs updated – rebooting");
     esp_restart();
 }
 
 void device_config_set_setup_complete(const char *ssid, const char *pw)
 {
-    strlcpy(g_cfg.wifi_ssid,     ssid, sizeof(g_cfg.wifi_ssid));
-    strlcpy(g_cfg.wifi_password, pw,   sizeof(g_cfg.wifi_password));
     g_cfg.setup_done = true;
 
     nvs_handle_t h;
     ESP_ERROR_CHECK(nvs_open(NVS_NS, NVS_READWRITE, &h));
-    nvs_set_str(h, NVS_KEY_WIFI_SSID,  ssid);
-    nvs_set_str(h, NVS_KEY_WIFI_PW,    pw);
+    if (ssid && pw) {  // Zigbee 모델은 NULL (네트워크 정보는 Zigbee 스택이 자체 저장)
+        strlcpy(g_cfg.wifi_ssid,     ssid, sizeof(g_cfg.wifi_ssid));
+        strlcpy(g_cfg.wifi_password, pw,   sizeof(g_cfg.wifi_password));
+        nvs_set_str(h, NVS_KEY_WIFI_SSID,  ssid);
+        nvs_set_str(h, NVS_KEY_WIFI_PW,    pw);
+    }
     nvs_set_u8(h,  NVS_KEY_SETUP_DONE, 1);
     nvs_commit(h);
     nvs_close(h);
@@ -228,5 +240,5 @@ void device_config_factory_reset(void)
     }
     ble_server_clear_bonds();
     ESP_LOGI(TAG, "Factory reset – rebooting");
-    esp_restart();
+    transport_factory_reset();  // never returns
 }

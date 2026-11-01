@@ -2,3 +2,6 @@ dependencies:
   idf: ">=5.0"
   espressif/led_strip: "^3.0.0"
   espressif/cjson: ">=1.0.0"
+  # Zigbee 모델 전용. Wi-Fi 빌드에선 CONFIG_ZB_ENABLED=n이라 소스·라이브러리가 빠진다.
+  # 2.0.5(2026-10-16)는 배포 2주 미만이라 직전 버전으로 고정.
+  espressif/esp-zigbee-lib: "==2.0.4"

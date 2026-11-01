@@ -1,0 +1,9 @@
+# 서버(Flask 발행 + server/mqtt_worker.py): 모든 홈을 읽고, 기기 응답·permit join만 쓴다.
+# Zigbee2MQTT의 bridge/request/extension/* 같은 관리 토픽은 쓰지 못하게 둔다(CVE-2026-71279: 외부 JS 저장 경로 조작).
+user server
+topic read homes/#
+topic write homes/+/+/set
+topic write homes/+/bridge/request/permit_join
+
+# 게이트웨이(Zigbee2MQTT): 사용자명 = gateway_id, 자기 토픽(Z2M base_topic = homes/<gateway_id>)만
+pattern readwrite homes/%u/#

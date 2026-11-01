@@ -1,0 +1,9 @@
+# 8MB 플래시 기준(보유 보드 8MB·16MB 공용), Wi-Fi·Zigbee 모델 공통.
+# Zigbee 스택(esp-zigbee-lib 2.x)은 네트워크 정보를 nvs에 저장하므로 nvs를 64KB로 키웠다.
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x10000
+otadata,  data, ota,     0x19000,  0x2000
+phy_init, data, phy,     0x1B000,  0x1000
+zb_fct,   data, fat,     0x1C000,  0x1000
+ota_0,    app,  ota_0,   0x20000,  0x300000
+ota_1,    app,  ota_1,   0x320000, 0x300000

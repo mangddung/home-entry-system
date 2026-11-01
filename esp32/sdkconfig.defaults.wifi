@@ -1,0 +1,2 @@
+# Wi-Fi 모델 (상시 전원, HTTP 직접 통신)
+CONFIG_DOORLOCK_TRANSPORT_WIFI=y

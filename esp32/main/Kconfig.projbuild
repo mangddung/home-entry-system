@@ -1,0 +1,19 @@
+menu "Doorlock"
+
+    # 모델별 값은 sdkconfig.defaults.<wifi|zigbee>에서 고른다(gen_config가 지정).
+    # Zigbee 스택 옵션(ZB_ENABLED, ZB_ZED)도 sdkconfig.defaults.zigbee에 있다.
+    choice DOORLOCK_TRANSPORT
+        prompt "Server transport (product model)"
+        default DOORLOCK_TRANSPORT_WIFI
+        help
+            Wi-Fi 모델: HTTP로 서버 직접 통신(상시 전원).
+            Zigbee 모델: Zigbee → 게이트웨이 → MQTT → 서버.
+
+        config DOORLOCK_TRANSPORT_WIFI
+            bool "Wi-Fi"
+
+        config DOORLOCK_TRANSPORT_ZIGBEE
+            bool "Zigbee"
+    endchoice
+
+endmenu

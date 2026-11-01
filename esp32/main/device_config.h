@@ -30,11 +30,15 @@ void device_config_set_token(const char *token);
 // Update refresh token only (no reboot needed)
 void device_config_set_refresh_token(const char *refresh_token);
 
+// Save all BLE UUIDs to NVS (no reboot)
+void device_config_save_ble(const char *svc, const char *read,
+                             const char *write, const char *mfr);
+
 // Update all BLE UUIDs and reboot to apply
 void device_config_update_ble(const char *svc, const char *read,
                                const char *write, const char *mfr);
 
-// Save WiFi credentials + mark setup complete, then reboot
+// Save WiFi credentials (NULL이면 생략, Zigbee 모델) + mark setup complete, then reboot
 void device_config_set_setup_complete(const char *ssid, const char *pw);
 
 // Clear setup_done + WiFi credentials from NVS, then reboot

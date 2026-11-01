@@ -24,6 +24,10 @@ def setup_claim_expired(requested_at) -> bool:
         return True
     return datetime.utcnow() - requested_at > SETUP_CLAIM_TTL
 
+def hw_fields(device) -> dict:
+    """기기 행을 지우고 다시 만드는 경로(설정 완료·리셋·앱 삭제)에서 그대로 옮겨야 하는 하드웨어 정보."""
+    return {"transport": device.transport, "ieee_addr": device.ieee_addr, "gateway_id": device.gateway_id}
+
 def check_device_limit(session, user_uuid: str) -> bool:
     """유저가 등록/참여한 기기 총 개수(역할 무관)가 제한 미만인지 확인"""
     count = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid).count()

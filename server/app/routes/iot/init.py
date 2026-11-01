@@ -11,7 +11,7 @@ import jwt
 from app.utils.database import database as _db
 from app.utils.database.models import DeviceManagement, User, UserDeviceMapping, UserToken, DeviceRefreshToken, TokenBlacklist, TokenUsage
 from app.utils.crypto_utils import decrpyt_key, ble_mac
-from app.utils.device_utils import _generate_device_secret, _issue_device_jwt, issue_device_token_pair, check_device_limit, setup_claim_expired
+from app.utils.device_utils import _generate_device_secret, _issue_device_jwt, issue_device_token_pair, check_device_limit, setup_claim_expired, hw_fields
 from app.utils.log_utils import log_activity
 from app.utils.fcm_utils import send_to_device_master, send_to_user
 from app.utils.schedule import match_window, period_key
@@ -104,9 +104,14 @@ def iot_init():
             device.ble_manufacturer_uuid != manufacturer_uuid):
             return jsonify({"status": "failed", "message": "uuid mismatch"}), 403
 
+    notify_power_on(device_uuid, master_nickname)
+    return jsonify({"status": "ok"}), 200
+
+
+def notify_power_on(device_uuid: str, master_nickname: str):
+    """기기 부팅(서버 init) 알림. Wi-Fi /iot/init과 Zigbee 부팅 ping이 같이 쓴다."""
     log_activity("device_init", device_uuid=device_uuid)
     send_to_device_master(device_uuid, f"{master_nickname} 기기 알림", "기기 전원이 켜졌습니다", data={"type": "refresh_devices"})
-    return jsonify({"status": "ok"}), 200
 
 
 # POST /iot/validate_token
@@ -138,6 +143,13 @@ def iot_validate_token():
     if not _is_ble_otp_hex(nonce):
         return jsonify({"status": "error", "message": "Invalid nonce format"}), 400
 
+    body, status = validate_mac(device_uuid, mac, nonce)
+    return jsonify(body), status
+
+
+def validate_mac(device_uuid: str, mac: str, nonce: str) -> tuple[dict, int]:
+    """근접 열기 인증. mac·nonce는 형식 검증을 마친 hex. Wi-Fi(HTTP)·Zigbee(MQTT 워커) 공용.
+    반환: (응답 body, HTTP 상태). 200이면 기기가 문을 연다."""
     # user_uuid와 토큰 원문은 받지 않는다. 이 기기에 매핑된 사용자마다 키와 토큰으로
     # mac을 다시 계산해 일치하는 사용자·토큰을 요청자로 본다. nonce는 ESP가 보낸 값이라
     # 과거 mac을 재전송하거나 nonce를 바꿔치기하면 일치하지 않는다.
@@ -169,7 +181,7 @@ def iot_validate_token():
             break
 
     if user is None:
-        return jsonify({"status": "error", "message": "Invalid mac or key"}), 400
+        return {"status": "error", "message": "Invalid mac or key"}, 400
     user_uuid = user.user_uuid
 
     # 토큰 검증
@@ -178,7 +190,7 @@ def iot_validate_token():
     with _db.Session() as session:
         if not received_token:
             _notify_auth_denied(session, user.user_uuid, device_uuid, "발급받은 토큰이 없습니다")
-            return jsonify({"status": "error", "message": "no token"}), 400
+            return {"status": "error", "message": "no token"}, 400
 
         token = session.query(UserToken).filter(
             UserToken.token_value==received_token, 
@@ -199,12 +211,12 @@ def iot_validate_token():
                 except (ValueError, TypeError, ZoneInfoNotFoundError):
                     log_activity("token_schedule_error", user_uuid=user.user_uuid, device_uuid=device_uuid)
                     _notify_auth_denied(session, user.user_uuid, device_uuid, "토큰 설정에 문제가 있습니다")
-                    return jsonify({"status": "error", "message": "Token invalid"}), 400
+                    return {"status": "error", "message": "Token invalid"}, 400
 
                 window, start_date = match_window(schedule, local_now)
                 if window is None:
                     _notify_auth_denied(session, user.user_uuid, device_uuid, "사용 가능한 시간이 아닙니다")
-                    return jsonify({"status": "error", "message": "Token invalid"}), 400
+                    return {"status": "error", "message": "Token invalid"}, 400
 
                 key   = period_key(window, start_date)
                 usage = session.query(TokenUsage).filter_by(token_id=token.id, period_key=key).first()
@@ -213,7 +225,7 @@ def iot_validate_token():
                     session.add(usage)
                 if usage.uses >= window["max_uses"]:
                     _notify_auth_denied(session, user.user_uuid, device_uuid, "이 시간대에 허용된 횟수를 모두 사용했습니다")
-                    return jsonify({"status": "error", "message": "Token invalid"}), 400
+                    return {"status": "error", "message": "Token invalid"}, 400
                 usage.uses += 1
 
             token.use_count += 1
@@ -242,10 +254,10 @@ def iot_validate_token():
             if not is_master and master_uuid:
                 send_to_user(master_uuid, f"{master_nickname} 기기 알림", f"{user_display} {role_label}가 인증 성공")
 
-            return jsonify({"status": "success", "message": "Token validated"}), 200
+            return {"status": "success", "message": "Token validated"}, 200
         else:
             _notify_auth_denied(session, user.user_uuid, device_uuid, "사용할 수 없는 토큰입니다")
-            return jsonify({"status": "error", "message": "Token invalid"}), 400
+            return {"status": "error", "message": "Token invalid"}, 400
 
 # POST /iot/ping
 @iot_bp.route("/ping", methods=["POST"])
@@ -263,12 +275,15 @@ def iot_ping():
     # last_ping_at은 _decode_device_token에서 갱신된다(기기 요청 전체 공통)
     device_uuid = payload.get("sub")
 
-    # registered=false면 기기가 스스로 초기화해 셋업 모드로 돌아간다(마스터가 앱에서 삭제한 경우)
-    with _db.Session() as session:
-        registered = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first() is not None
-
+    registered = is_registered(device_uuid)
     log_activity("device_ping", device_uuid=device_uuid)
     return jsonify({"status": "success", "message": "pong", "registered": registered}), 200
+
+
+def is_registered(device_uuid: str) -> bool:
+    """false면 기기가 스스로 초기화해 셋업 모드로 돌아간다(마스터가 앱에서 삭제한 경우)."""
+    with _db.Session() as session:
+        return session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first() is not None
 
 # POST /iot/validate_setup
 @iot_bp.route("/validate_setup", methods=["POST"])
@@ -301,69 +316,78 @@ def iot_validate_setup():
         if not hmac.compare_digest(db_secret_key.encode(), secret_key.encode()):
             return jsonify({"status": "failed", "message": "invalid key"}), 401
 
-        # master가 될 사용자는 앱이 보낸 값이 아니라 /client/setup-token 발급 시 서버가 기록한 요청자다.
-        user_uuid = device.setup_user_uuid
-        if not user_uuid or setup_claim_expired(device.setup_requested_at):
-            return jsonify({"status": "error", "message": "Setup not requested"}), 400
+        body, status = complete_setup(session, device)
+        return jsonify(body), status
 
-        user = session.query(User).filter_by(user_uuid=user_uuid).first()
-        if user is None:
-            return jsonify({"status": "error", "message": "User not found"}), 400
 
-        if not check_device_limit(session, user_uuid):
-            return jsonify({"status": "error", "message": "device limit exceeded"}), 409
+def complete_setup(session, device, ble_uuids: tuple[str, str, str, str] | None = None) -> tuple[dict, int]:
+    """셋업 토큰 검증을 통과한 기기를 요청자 소유로 등록한다. Wi-Fi(HTTP)·Zigbee(MQTT 워커) 공용.
+    ble_uuids: (service, read, write, manufacturer). None이면 새로 뽑는다(Zigbee는 기기와 공유한 seed로 만든 값을 넘긴다).
+    반환: (응답 body, HTTP 상태)."""
+    device_uuid = device.device_uuid
+    # master가 될 사용자는 앱이 보낸 값이 아니라 /client/setup-token 발급 시 서버가 기록한 요청자다.
+    user_uuid = device.setup_user_uuid
+    if not user_uuid or setup_claim_expired(device.setup_requested_at):
+        return {"status": "error", "message": "Setup not requested"}, 400
 
-        # 업데이트 기기 정보
-        new_ble_service_uuid      = str(uuid.uuid4())
-        new_ble_read_uuid         = str(uuid.uuid4())
-        new_ble_write_uuid        = str(uuid.uuid4())
-        new_ble_manufacturer_uuid = str(uuid.uuid4())
-        new_setup_token = secrets.token_urlsafe(32)
-        saved_secret_key = device.device_secret_key
+    user = session.query(User).filter_by(user_uuid=user_uuid).first()
+    if user is None:
+        return {"status": "error", "message": "User not found"}, 400
 
-        # DB에서 삭제하여 참조하는 다른 테이블 데이터 삭제
-        session.delete(device)
-        session.flush()
+    if not check_device_limit(session, user_uuid):
+        return {"status": "error", "message": "device limit exceeded"}, 409
 
-        # 기기 정보 다시 생성 (device_token은 임시값, 아래에서 issue_device_token_pair로 갱신)
-        new_device = DeviceManagement(
-            device_uuid=device_uuid,
-            device_secret_key=saved_secret_key,
-            device_token="",
-            setup_token=new_setup_token,
-            ble_service_uuid=new_ble_service_uuid,
-            ble_read_uuid=new_ble_read_uuid,
-            ble_write_uuid=new_ble_write_uuid,
-            ble_manufacturer_uuid=new_ble_manufacturer_uuid,
-        )
-        session.add(new_device)
-        session.flush()
+    # 업데이트 기기 정보
+    (new_ble_service_uuid, new_ble_read_uuid,
+     new_ble_write_uuid, new_ble_manufacturer_uuid) = ble_uuids or tuple(str(uuid.uuid4()) for _ in range(4))
+    new_setup_token = secrets.token_urlsafe(32)
+    saved_secret_key = device.device_secret_key
+    saved_hw = hw_fields(device)
 
-        new_access, new_refresh = issue_device_token_pair(
-            device_uuid, new_ble_service_uuid, new_ble_read_uuid, new_ble_write_uuid,
-            new_ble_manufacturer_uuid, session=session,
-        )
-        new_device.device_token = new_access
+    # DB에서 삭제하여 참조하는 다른 테이블 데이터 삭제
+    session.delete(device)
+    session.flush()
 
-        new_mapping = UserDeviceMapping(
-            user_uuid=user_uuid,
-            device_uuid=device_uuid,
-            role="master",
-            display_name="master"
-        )
-        session.add(new_mapping)
-        session.commit()
+    # 기기 정보 다시 생성 (device_token은 임시값, 아래에서 issue_device_token_pair로 갱신)
+    new_device = DeviceManagement(
+        device_uuid=device_uuid,
+        device_secret_key=saved_secret_key,
+        device_token="",
+        setup_token=new_setup_token,
+        ble_service_uuid=new_ble_service_uuid,
+        ble_read_uuid=new_ble_read_uuid,
+        ble_write_uuid=new_ble_write_uuid,
+        ble_manufacturer_uuid=new_ble_manufacturer_uuid,
+        **saved_hw,
+    )
+    session.add(new_device)
+    session.flush()
 
-        new_data = {
-            "access_token": new_access,
-            "refresh_token": new_refresh,
-        }
-        log_activity("device_setup", user_uuid=user_uuid, device_uuid=device_uuid)
-        send_to_user(user_uuid, f"{device_uuid[:8]} 기기 알림", "기기가 등록되었습니다", data={"type": "refresh_devices"})
-        return jsonify({
-            "status": "success",
-            "data": new_data
-            }), 200
+    new_access, new_refresh = issue_device_token_pair(
+        device_uuid, new_ble_service_uuid, new_ble_read_uuid, new_ble_write_uuid,
+        new_ble_manufacturer_uuid, session=session,
+    )
+    new_device.device_token = new_access
+
+    new_mapping = UserDeviceMapping(
+        user_uuid=user_uuid,
+        device_uuid=device_uuid,
+        role="master",
+        display_name="master"
+    )
+    session.add(new_mapping)
+    session.commit()
+
+    new_data = {
+        "access_token": new_access,
+        "refresh_token": new_refresh,
+    }
+    log_activity("device_setup", user_uuid=user_uuid, device_uuid=device_uuid)
+    send_to_user(user_uuid, f"{device_uuid[:8]} 기기 알림", "기기가 등록되었습니다", data={"type": "refresh_devices"})
+    return {
+        "status": "success",
+        "data": new_data
+        }, 200
     
 # POST /iot/reset
 @iot_bp.route("/reset", methods=["POST"])
@@ -379,10 +403,16 @@ def iot_reset():
         return jsonify({"status": "error", "message": "Invalid token"}), 401
     device_uuid = payload.get("sub", "")
 
+    body, status = reset_device(device_uuid)
+    return jsonify(body), status
+
+
+def reset_device(device_uuid: str) -> tuple[dict, int]:
+    """기기 공장 초기화(BOOT 버튼) 처리: 멤버 추방 후 미등록 상태로 되돌린다. Wi-Fi·Zigbee 공용."""
     with _db.Session() as session:
         device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()
         if device is None:
-            return jsonify({"status": "error", "message": "Device not found"}), 400
+            return {"status": "error", "message": "Device not found"}, 400
 
         master_mapping  = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first()
         master_uuid     = master_mapping.user_uuid if master_mapping else None
@@ -403,6 +433,8 @@ def iot_reset():
             "ble_read_uuid": device.ble_read_uuid,
             "ble_write_uuid": device.ble_write_uuid,
             "ble_manufacturer_uuid": device.ble_manufacturer_uuid,
+            **hw_fields(device),
+            "gateway_id": None,  # 미등록이 되면 게이트웨이 묶음을 푼다(다음 셋업에서 다시 묶인다)
         }
 
         session.delete(device)
@@ -424,14 +456,14 @@ def iot_reset():
             send_to_user(member_uuid, f"{nickname} 기기 알림", "기기 초기화로 그룹에서 추방되었습니다", data={"type": "refresh_devices"})
         if master_uuid:
             send_to_user(master_uuid, f"{master_nickname} 기기 알림", "기기가 리셋되었습니다", data={"type": "refresh_devices"})
-        return jsonify({
+        return {
             "status": "success",
             "message": "reset success",
             "data": {
                 "access_token": new_access,
                 "refresh_token": new_refresh,
             }
-            }), 200
+            }, 200
 
 
 # POST /iot/refresh  Authorization: Bearer <old_access_token>  { "refresh_token": "..." }

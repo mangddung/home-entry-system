@@ -94,6 +94,12 @@ class DeviceManagement(Base):
     current_jti           = Column(String(36), nullable=True)
     # 근접 해제 기기 임계값(dBm, 마스터가 보정). NULL이면 앱이 첫 발견 즉시 연결(기존 동작).
     rssi_threshold        = Column(Integer, nullable=True)
+    # 제품 모델(서버 통신 경로): "wifi"(HTTP 직접) / "zigbee"(게이트웨이 → MQTT). gen_config가 기록.
+    transport             = Column(String(10), nullable=False, default="wifi", server_default="wifi")
+    # 칩 EUI-64 ("0x" + 16 hex, Z2M friendly name 형식). Zigbee 기기는 이 값으로 식별한다.
+    ieee_addr             = Column(String(18), nullable=True, unique=True)
+    # 마지막으로 메시지가 들어온 게이트웨이 (Zigbee 기기만)
+    gateway_id            = Column(String(50), nullable=True)
 
     settings        = relationship("Settings", back_populates="device", cascade="all, delete-orphan")
     location        = relationship("DeviceLocation", back_populates="device", cascade="all, delete-orphan", uselist=False)
@@ -101,6 +107,15 @@ class DeviceManagement(Base):
     user_mappings   = relationship("UserDeviceMapping", back_populates="device", cascade="all, delete-orphan")
     user_tokens     = relationship("UserToken", back_populates="device", cascade="all, delete-orphan")
     refresh_tokens  = relationship("DeviceRefreshToken", back_populates="device", cascade="all, delete-orphan")
+
+
+class Gateway(Base):
+    """Zigbee 게이트웨이(현 단계: Zigbee2MQTT). MQTT 토픽 homes/<gateway_id>/... 를 쓴다.
+    MQTT 계정은 Mosquitto 비밀번호 파일에 있다(gateway/setup_dev_gateway.py가 만든다)."""
+    __tablename__ = "gateways"
+
+    gateway_id = Column(String(50), primary_key=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class Settings(Base):

@@ -1,7 +1,7 @@
 #include "ble_server.h"
 #include "app_config.h"
 #include "device_config.h"
-#include "http_api.h"
+#include "transport.h"
 #include "led_indicator.h"
 
 #include "nimble/nimble_port.h"
@@ -15,14 +15,10 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "esp_mac.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-#include "freertos/event_groups.h"
 #include "psa/crypto.h"
-#include "cJSON.h"
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
@@ -62,12 +58,6 @@ static ble_uuid128_t    s_setup_write_uuid;
 static uint16_t         s_setup_notify_handle;
 static esp_timer_handle_t s_setup_timeout_timer = NULL;
 static bool              s_setup_timed_out = false;  // SETUP_ADV_TIMEOUT_MS 동안 미연결
-
-// Setup WiFi
-static EventGroupHandle_t s_setup_wifi_eg = NULL;
-#define SETUP_WIFI_OK_BIT    BIT0
-#define SETUP_WIFI_FAIL_BIT  BIT1
-static bool s_setup_wifi_driver_init = false;
 
 // Parse "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" into NimBLE little-endian layout
 static bool parse_uuid128(const char *str, ble_uuid128_t *out)
@@ -182,7 +172,7 @@ static void process_write_payload(const char *msg, uint16_t len)
     s_current_otp[0] = '\0';
 
     // buf is heap-allocated and null-terminated, so msg is safe to pass directly
-    http_request_validate_token(msg, nonce);
+    transport_validate_token(msg, nonce);
 }
 
 static int chr_write_access(uint16_t conn_handle, uint16_t attr_handle,
@@ -261,6 +251,11 @@ static void adv_set_name_rsp(void)
     ble_gap_adv_rsp_set_fields(&rsp);
 }
 
+// 광고 manufacturer data: company ID(little-endian) + 모델 코드(transport.h).
+// 앱 스캔 목록이 연결 전에 Wi-Fi/Zigbee 아이콘을 고른다. 광고 31바이트 중 26바이트 사용.
+// ponytail: Espressif company ID(0x02E5)를 빌려 쓴다. 자체 Bluetooth SIG ID를 받으면 교체(앱 lib/ble.ts도 함께).
+static const uint8_t s_adv_mfg_data[] = { 0xE5, 0x02, TRANSPORT_MODEL_CODE };
+
 // ── Advertising ───────────────────────────────────────────────────────────────
 // 쉬는 구간 없이 고정 간격으로 계속 광고한다. 앱의 근접 해제(RSSI 중앙값 판정)가
 // 고른 샘플을 받아야 해제 지연이 들쭉날쭉하지 않다. 예전 방식(30~60ms 광고 + 3초 휴식)과
@@ -281,6 +276,8 @@ static void ble_advertise(void)
         .uuids128           = &s_svc_uuid,
         .num_uuids128       = 1,
         .uuids128_is_complete = 1,
+        .mfg_data           = s_adv_mfg_data,
+        .mfg_data_len       = sizeof(s_adv_mfg_data),
     };
     ble_gap_adv_set_fields(&fields);
     adv_set_name_rsp();
@@ -455,79 +452,6 @@ static void compute_sha256_hex(const char *code, const char *nonce, char out_hex
     out_hex[64] = '\0';
 }
 
-// ── Setup WiFi helper ─────────────────────────────────────────────────────────
-static uint8_t s_setup_wifi_reason = 0;   // 마지막 STA_DISCONNECTED 사유
-
-static void setup_wifi_event_handler(void *arg, esp_event_base_t base,
-                                      int32_t id, void *data)
-{
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        wifi_event_sta_disconnected_t *ev = (wifi_event_sta_disconnected_t *)data;
-        if (ev) s_setup_wifi_reason = ev->reason;
-        xEventGroupSetBits(s_setup_wifi_eg, SETUP_WIFI_FAIL_BIT);
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(s_setup_wifi_eg, SETUP_WIFI_OK_BIT);
-    }
-}
-
-// disconnect 사유를 앱이 안내 문구로 쓸 수 있는 코드로 매핑.
-// NO_AP: SSID를 못 찾음 — 5GHz 전용 AP거나 범위 밖 (ESP32-C6는 2.4GHz만 지원)
-// AUTH:  AP는 찾았으나 인증 실패 — 비밀번호 오류가 대부분
-static const char *setup_wifi_fail_code(void)
-{
-    switch (s_setup_wifi_reason) {
-        case WIFI_REASON_NO_AP_FOUND:
-            return "WIFI_FAIL:NO_AP";
-        case WIFI_REASON_AUTH_EXPIRE:
-        case WIFI_REASON_AUTH_FAIL:
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
-        case WIFI_REASON_HANDSHAKE_TIMEOUT:
-            return "WIFI_FAIL:AUTH";
-        default:
-            return "WIFI_FAIL";
-    }
-}
-
-// Returns true if WiFi connected and IP obtained within SETUP_WIFI_TIMEOUT_MS.
-// esp_netif_init() and esp_event_loop_create_default() must already be called.
-static bool setup_wifi_connect(const char *ssid, const char *pw)
-{
-    if (!s_setup_wifi_driver_init) {
-        s_setup_wifi_eg = xEventGroupCreate();
-        esp_netif_create_default_wifi_sta();
-        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-        ESP_ERROR_CHECK(esp_event_handler_register(
-            WIFI_EVENT, ESP_EVENT_ANY_ID, setup_wifi_event_handler, NULL));
-        ESP_ERROR_CHECK(esp_event_handler_register(
-            IP_EVENT, IP_EVENT_STA_GOT_IP, setup_wifi_event_handler, NULL));
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-        s_setup_wifi_driver_init = true;
-    } else {
-        esp_wifi_disconnect();
-        esp_wifi_stop();
-    }
-
-    wifi_config_t wifi_cfg = {0};
-    strlcpy((char *)wifi_cfg.sta.ssid,     ssid, sizeof(wifi_cfg.sta.ssid));
-    strlcpy((char *)wifi_cfg.sta.password, pw,   sizeof(wifi_cfg.sta.password));
-    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-
-    s_setup_wifi_reason = 0;
-    xEventGroupClearBits(s_setup_wifi_eg, SETUP_WIFI_OK_BIT | SETUP_WIFI_FAIL_BIT);
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    esp_wifi_connect();
-
-    EventBits_t bits = xEventGroupWaitBits(
-        s_setup_wifi_eg,
-        SETUP_WIFI_OK_BIT | SETUP_WIFI_FAIL_BIT,
-        pdFALSE, pdFALSE,
-        pdMS_TO_TICKS(SETUP_WIFI_TIMEOUT_MS));
-
-    return (bits & SETUP_WIFI_OK_BIT) != 0;
-}
-
 // ── Setup notify helper ───────────────────────────────────────────────────────
 static void setup_notify(const char *msg)
 {
@@ -575,78 +499,18 @@ static void setup_flow_task(void *arg)
              IOT_DEVICE_UUID, (int)strlen(IOT_DEVICE_UUID));
     setup_notify(IOT_DEVICE_UUID);
 
-    // Steps 6–9: credential receive + WiFi + server validation loop
+    // Steps 6–9: credential receive + network + server validation loop (모델별 transport)
     int retry_count = 0;
-    TickType_t cred_wait = pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS);
-
     while (retry_count < SETUP_MAX_RETRIES) {
-        // Step 6: wait for {"setup_token":"...","ssid":"...","pw":"..."}
-        if (xQueueReceive(s_setup_queue, &msg, cred_wait) != pdTRUE) {
+        // Step 6: wait for credentials JSON (Wi-Fi: setup_token + ssid/pw, Zigbee: setup_token)
+        if (xQueueReceive(s_setup_queue, &msg, pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS)) != pdTRUE) {
             ESP_LOGW(TAG, "Setup: credentials timeout");
             goto disconnect;
         }
-
-        cJSON *root = cJSON_Parse(msg.data);
-        if (!root) {
-            ESP_LOGE(TAG, "Setup: invalid JSON credentials");
-            goto disconnect;
-        }
-        cJSON *jtok  = cJSON_GetObjectItemCaseSensitive(root, "setup_token");
-        cJSON *jssid = cJSON_GetObjectItemCaseSensitive(root, "wifi_ssid");
-        cJSON *jpw   = cJSON_GetObjectItemCaseSensitive(root, "wifi_pw");
-
-        if (!cJSON_IsString(jtok) || !cJSON_IsString(jssid) ||
-            !cJSON_IsString(jpw)) {
-            cJSON_Delete(root);
-            ESP_LOGE(TAG, "Setup: missing JSON fields");
-            goto disconnect;
-        }
-
-        char setup_token[256], wifi_ssid[CFG_SSID_LEN], wifi_pw[CFG_PW_LEN];
-        strlcpy(setup_token, jtok->valuestring,  sizeof(setup_token));
-        strlcpy(wifi_ssid,   jssid->valuestring, sizeof(wifi_ssid));
-        strlcpy(wifi_pw,     jpw->valuestring,   sizeof(wifi_pw));
-        cJSON_Delete(root);
-
-        // Step 7: ACK receipt
-        setup_notify("ACK");
-
-        // Step 8: try WiFi
-        ESP_LOGI(TAG, "Setup: connecting WiFi \"%s\"", wifi_ssid);
-        if (!setup_wifi_connect(wifi_ssid, wifi_pw)) {
-            retry_count++;
-            const char *fail_code = setup_wifi_fail_code();
-            ESP_LOGW(TAG, "Setup: WiFi failed (reason %d, %s) (retry %d/%d)",
-                     s_setup_wifi_reason, fail_code, retry_count, SETUP_MAX_RETRIES);
-            setup_notify(fail_code);
-            cred_wait = pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS);
-            continue;
-        }
-        ESP_LOGI(TAG, "Setup: WiFi connected");
-
-        // Step 8: validate setup_token with server (retry on 5xx)
-        int status = 0;
-        for (int srv_try = 0; srv_try < SETUP_MAX_RETRIES; srv_try++) {
-            status = http_validate_setup(setup_token);
-            if (status == 200 || (status >= 400 && status < 500)) break;
-            ESP_LOGW(TAG, "Setup: server error %d – retry %d", status, srv_try + 1);
-            vTaskDelay(pdMS_TO_TICKS(2000));
-        }
-
-        if (status == 200) {
-            // Step 9: send REGISTERED
-            setup_notify("REGISTERED");
-            vTaskDelay(pdMS_TO_TICKS(500));  // give notification time to deliver
-            // Step 10: save to NVS and reboot (never returns)
-            device_config_set_setup_complete(wifi_ssid, wifi_pw);
-        }
-
-        // Token rejected by server
+        // 성공하면 저장 후 재부팅되어 돌아오지 않는다
+        if (!transport_setup(msg.data, setup_notify)) goto disconnect;
         retry_count++;
-        ESP_LOGW(TAG, "Setup: token invalid (HTTP %d), retry %d/%d",
-                 status, retry_count, SETUP_MAX_RETRIES);
-        setup_notify("TOKEN_FAIL");
-        cred_wait = pdMS_TO_TICKS(SETUP_CRED_TIMEOUT_MS);
+        ESP_LOGW(TAG, "Setup: attempt failed (retry %d/%d)", retry_count, SETUP_MAX_RETRIES);
     }
 
 disconnect:
@@ -799,6 +663,8 @@ static void setup_ble_advertise(void)
         .uuids128           = &s_setup_svc_uuid,
         .num_uuids128       = 1,
         .uuids128_is_complete = 1,
+        .mfg_data           = s_adv_mfg_data,
+        .mfg_data_len       = sizeof(s_adv_mfg_data),
     };
     ble_gap_adv_set_fields(&fields);
     adv_set_name_rsp();

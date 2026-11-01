@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+__pycache__
+**/__pycache__
+.git
+data/
+server/data/
+server/.venv
+**/.env
+server/*.json
+esp32/build*/
+esp32/managed_components/
+app/android/
+gateway/z2m/data/
+mosquitto/config/passwd

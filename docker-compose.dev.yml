@@ -1,0 +1,13 @@
+# 개발: Zigbee 모델용 MQTT 브로커. docker compose -f docker-compose.dev.yml up -d
+# 운영(docker-compose.yml)과 같은 포트·설정, restart 없음. iot-app 호스트 포트 대역 158xx (서버 15895).
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0.22
+    ports:
+      - "127.0.0.1:15883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - mosquitto_data_dev:/mosquitto/data
+
+volumes:
+  mosquitto_data_dev:
