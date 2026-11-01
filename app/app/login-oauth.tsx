@@ -166,9 +166,12 @@ export default function LoginOAuthScreen() {
 
       <View style={styles.buttonArea}>
         <KakaoLoginButton onPress={handleKakaoLogin} loading={loading} />
-        <TouchableOpacity style={styles.debugButton} onPress={() => router.push("/debug")}>
-          <Text style={[styles.debugButtonText, { color: colors.icon }]}>Debug Login</Text>
-        </TouchableOpacity>
+        {/* app/.env에 관리자 키를 넣은 빌드에서만 보인다. 키를 빼고 빌드하면 사라진다. */}
+        {process.env.EXPO_PUBLIC_ADMIN_KEY ? (
+          <TouchableOpacity style={styles.debugButton} onPress={() => router.push("/debug")}>
+            <Text style={[styles.debugButtonText, { color: colors.icon }]}>Debug Login</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
     </View>
   );
