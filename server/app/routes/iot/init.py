@@ -289,7 +289,6 @@ def iot_ping():
     device_uuid = payload.get("sub")
 
     registered = is_registered(device_uuid)
-    log_activity("device_ping", device_uuid=device_uuid)
     return jsonify({"status": "success", "message": "pong", "registered": registered}), 200
 
 

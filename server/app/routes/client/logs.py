@@ -16,9 +16,8 @@ CATEGORY_PATTERNS = {
     "member": "member_%",
 }
 
-EXCLUDED_ACTIONS = [
-    "device_ping",
-]
+DEFAULT_LOG_LIMIT = 50
+MAX_LOG_LIMIT = 200
 
 
 def _display_name(user_uuid, detail, name_map):
@@ -43,6 +42,8 @@ def get_logs():
     user_uuid   = payload["sub"]
     device_uuid = (request.args.get("device_uuid") or "").strip()
     category    = (request.args.get("category") or "").strip()
+    before_id   = request.args.get("before_id", type=int)
+    limit       = max(1, min(request.args.get("limit", DEFAULT_LOG_LIMIT, type=int), MAX_LOG_LIMIT))
 
     if not device_uuid:
         return jsonify({"status": "error", "message": "invalid payload"}), 400
@@ -52,10 +53,7 @@ def get_logs():
         if not mapping:
             return jsonify({"status": "error", "message": "forbidden"}), 403
 
-        query = session.query(ActivityLog).filter(
-            ActivityLog.device_uuid == device_uuid,
-            ActivityLog.action.notin_(EXCLUDED_ACTIONS)
-        )
+        query = session.query(ActivityLog).filter(ActivityLog.device_uuid == device_uuid)
 
         # 리셋해도 device_uuid는 그대로라 이전 소유자·멤버의 로그가 남는다. DB엔 두고 마지막 리셋 이후만 보여준다.
         last_reset_at = session.query(func.max(ActivityLog.created_at)).filter(
@@ -76,7 +74,13 @@ def get_logs():
         elif category in CATEGORY_PATTERNS:
             query = query.filter(ActivityLog.action.like(CATEGORY_PATTERNS[category]))
 
-        logs = query.order_by(ActivityLog.created_at.desc()).all()
+        if before_id is not None:
+            query = query.filter(ActivityLog.id < before_id)
+
+        # 한 행 더 읽어 다음 페이지 유무를 판단한다
+        rows = query.order_by(ActivityLog.id.desc()).limit(limit + 1).all()
+        logs = rows[:limit]
+        next_before_id = logs[-1].id if len(rows) > limit else None
 
         mappings = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid).all()
         display_name_map = {m.user_uuid: m.display_name for m in mappings}
@@ -90,4 +94,4 @@ def get_logs():
             "created_at":   l.created_at.isoformat() + "Z" if l.created_at else None,
         } for l in logs]
 
-        return jsonify({"status": "success", "data": data}), 200
+        return jsonify({"status": "success", "data": data, "next_before_id": next_before_id}), 200

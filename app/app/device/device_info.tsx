@@ -406,16 +406,38 @@ export default function DeviceInfoView() {
   const [activityLogLoading, setActivityLogLoading] = useState(false);
   const [activityLogError, setActivityLogError] = useState("");
   const [activityLogTab, setActivityLogTab] = useState<"device" | "access" | "member">("device");
+  const [activityLogNext, setActivityLogNext] = useState<number | null>(null);
+  const [activityLogMoreLoading, setActivityLogMoreLoading] = useState(false);
+  // 탭을 바꾼 뒤 늦게 도착한 응답이 목록을 덮지 않도록 요청을 구분한다
+  const activityLogRequestRef = useRef(0);
 
   const loadActivityLogs = async (category: "device" | "access" | "member", deviceUuid: string) => {
+    const request = ++activityLogRequestRef.current;
     setActivityLogLoading(true);
     setActivityLogError("");
     const result = await fetchDeviceLogs(deviceUuid, category);
+    if (request !== activityLogRequestRef.current) return;
     setActivityLogLoading(false);
     if (result.type === "success") {
       setActivityLogs(result.data);
+      setActivityLogNext(result.next_before_id);
     } else {
       setActivityLogError(result.message ?? "로그를 불러오지 못했습니다.");
+    }
+  };
+
+  const loadMoreActivityLogs = async () => {
+    if (!device || activityLogNext == null) return;
+    const request = activityLogRequestRef.current;
+    setActivityLogMoreLoading(true);
+    const result = await fetchDeviceLogs(device.device_uuid, activityLogTab, activityLogNext);
+    setActivityLogMoreLoading(false);
+    if (request !== activityLogRequestRef.current) return;
+    if (result.type === "success") {
+      setActivityLogs((prev) => [...prev, ...result.data]);
+      setActivityLogNext(result.next_before_id);
+    } else {
+      showAlert("오류", result.message ?? "로그를 불러오지 못했습니다.");
     }
   };
 
@@ -2341,6 +2363,19 @@ export default function DeviceInfoView() {
                     )}
                   </View>
                 ))}
+                {activityLogNext != null && (
+                  <TouchableOpacity
+                    style={styles.activityLogMore}
+                    onPress={loadMoreActivityLogs}
+                    disabled={activityLogMoreLoading}
+                  >
+                    {activityLogMoreLoading ? (
+                      <ActivityIndicator size="small" color={colors.tabIconDefault} />
+                    ) : (
+                      <Text style={{ color: colors.tabIconDefault, fontSize: 13 }}>더 보기</Text>
+                    )}
+                  </TouchableOpacity>
+                )}
                 {activityLogs.length === 0 && (
                   <Text style={[styles.activityLogEmpty, { color: colors.tabIconDefault }]}>
                     로그가 없습니다.
@@ -3103,5 +3138,9 @@ const styles = StyleSheet.create({
     textAlign: "center",
     fontSize: 13,
     paddingVertical: 32,
+  },
+  activityLogMore: {
+    alignItems: "center",
+    paddingVertical: 14,
   },
 });

@@ -8,6 +8,7 @@ from firebase_admin import credentials
 from flask import Flask
 from flask_cors import CORS
 
+from app.utils.cleanup import start_cleanup_loop
 from app.utils.database import init_db
 from app.utils.limiter import limiter
 from app.routes.client.auth import auth_bp
@@ -32,6 +33,7 @@ def create_app():
     limiter.init_app(app)
 
     init_db()
+    start_cleanup_loop()
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(kakao_bp)

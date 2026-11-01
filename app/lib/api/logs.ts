@@ -15,6 +15,7 @@ export type DeviceLog = {
 export const fetchDeviceLogs = async (
   device_uuid: string,
   category: "device" | "access" | "member",
+  before_id?: number,
 ) => {
   const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
   if (!access_token) return { type: "forbidden" as const, message: "액세스 토큰이 없습니다." };
@@ -22,10 +23,14 @@ export const fetchDeviceLogs = async (
   try {
     const response = await axios.get(`${BACKEND_URL}/client/logs`, {
       headers: { Authorization: `Bearer ${access_token}` },
-      params: { device_uuid, category },
+      params: { device_uuid, category, before_id },
       timeout: 10000,
     });
-    return { type: "success" as const, data: response.data.data as DeviceLog[] };
+    return {
+      type: "success" as const,
+      data: response.data.data as DeviceLog[],
+      next_before_id: (response.data.next_before_id ?? null) as number | null,
+    };
   } catch (error) {
     return { type: "error" as const, message: getApiErrorMessage(error) };
   }
