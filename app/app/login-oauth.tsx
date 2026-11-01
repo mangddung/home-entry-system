@@ -1,7 +1,7 @@
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { showAlert } from "@/lib/alert";
-import { fetchSecretKey } from "@/lib/api/auth";
+import { exchangeKakaoCode, fetchSecretKey } from "@/lib/api/auth";
 import { fetchFcmToken } from "@/lib/api/fcm";
 import {
   BACKEND_URL,
@@ -9,9 +9,11 @@ import {
   USER_REFRESH_TOKEN_KEY,
   USER_UUID_KEY,
 } from "@/lib/constants";
+import { sha256 } from "@/lib/crypto";
 import { appendSystemLog } from "@/lib/system-log";
 import { setTokenSecure } from "@/lib/token-storage";
 import axios from "axios";
+import * as Crypto from "expo-crypto";
 import { useRouter } from "expo-router";
 import * as WebBrowser from "expo-web-browser";
 import React, { useEffect, useState } from "react";
@@ -87,11 +89,16 @@ export default function LoginOAuthScreen() {
     setLoading(true);
     appendSystemLog({ event_name: "Login", log_type: "INFO", message: "카카오 로그인 시작" });
     try {
+      // verifier는 앱만 안다. 돌아온 state가 다르면 내가 시작한 로그인이 아니고,
+      // 코드를 가로챈 쪽은 verifier가 없어 토큰으로 바꿀 수 없다.
+      const verifier = Array.from(Crypto.getRandomBytes(32), (b) => b.toString(16).padStart(2, "0")).join("");
+      const state = sha256(verifier);
       const authUrl =
         `https://kauth.kakao.com/oauth/authorize` +
         `?client_id=${kakaoConfig.client_id}` +
         `&redirect_uri=${encodeURIComponent(kakaoConfig.redirect_uri)}` +
-        `&response_type=code`;
+        `&response_type=code` +
+        `&state=${state}`;
 
       const result = await WebBrowser.openAuthSessionAsync(authUrl, "iotapp://login_oauth");
 
@@ -109,19 +116,24 @@ export default function LoginOAuthScreen() {
 
       const resultUrl = new URL(result.url);
       const error = resultUrl.searchParams.get("error");
-      const access_token = resultUrl.searchParams.get("access_token");
-      const refresh_token = resultUrl.searchParams.get("refresh_token");
-      const userUuid = resultUrl.searchParams.get("user_uuid");
+      const code = resultUrl.searchParams.get("code");
 
-      if (error || !access_token || !refresh_token || !userUuid) {
-        appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `카카오 로그인 콜백 오류: ${error ?? "토큰 누락"}` });
+      if (error || !code || resultUrl.searchParams.get("state") !== state) {
+        appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `카카오 로그인 콜백 오류: ${error ?? "코드·state 불일치"}` });
         showAlert("로그인 실패", error ?? "인증에 실패했습니다.");
         return;
       }
 
-      await setTokenSecure(USER_ACCESS_TOKEN_KEY, access_token);
-      await setTokenSecure(USER_REFRESH_TOKEN_KEY, refresh_token);
-      await setTokenSecure(USER_UUID_KEY, userUuid);
+      const tokens = await exchangeKakaoCode(code, verifier);
+      if (tokens.type !== "success") {
+        appendSystemLog({ event_name: "Login", log_type: "ERROR", message: `로그인 코드 교환 실패: ${tokens.message}` });
+        showAlert("로그인 실패", "인증에 실패했습니다.");
+        return;
+      }
+
+      await setTokenSecure(USER_ACCESS_TOKEN_KEY, tokens.access_token);
+      await setTokenSecure(USER_REFRESH_TOKEN_KEY, tokens.refresh_token);
+      await setTokenSecure(USER_UUID_KEY, tokens.user_uuid);
 
       // secret key 요청
       const key_request_result = await fetchSecretKey();

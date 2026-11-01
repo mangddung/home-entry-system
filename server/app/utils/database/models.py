@@ -182,6 +182,18 @@ class DeviceRefreshToken(Base):
     device = relationship("DeviceManagement", back_populates="refresh_tokens")
 
 
+class OAuthLoginCode(Base):
+    """카카오 콜백이 앱에 넘기는 일회용 코드. 토큰을 URL에 싣지 않으려고 쓴다.
+    state = sha256(앱만 아는 verifier)라서 코드를 가로채도 verifier 없이는 토큰으로 바꿀 수 없다.
+    테이블은 init_db가 없으면 만든다."""
+    __tablename__ = "oauth_login_codes"
+
+    code       = Column(String(64), primary_key=True)
+    user_uuid  = Column(String(50), ForeignKey("users.user_uuid", ondelete="CASCADE"), nullable=False)
+    state      = Column(String(64), nullable=False)
+    expired_at = Column(DateTime, nullable=False)
+
+
 class TokenBlacklist(Base):
     __tablename__ = "token_blacklist"
 
