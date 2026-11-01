@@ -109,20 +109,29 @@ function getActionLabel(action: string): string {
     member_guest_token_created: "게스트 토큰 발급",
     member_guest_token_deleted: "게스트 토큰 삭제",
     member_token_generated: "멤버 토큰 발급",
+    member_joined: "그룹 가입",
     device_location_added: "기기 위치 등록",
     device_location_updated: "기기 위치 변경",
+    device_setup_token_served: "기기 설정 시작",
+    device_setup: "기기 등록",
+    device_init: "기기 서버 연결",
+    device_reauth: "기기 재인증",
+    device_reset: "기기 초기화",
+    device_rssi_threshold_updated: "열림 거리 변경",
   };
   return map[action] ?? action;
 }
 
 // 서버가 detail을 JSON 문자열로 저장한다. 그대로 찍으면 {"role": ...}가 노출되므로 풀어서 보여준다.
-function formatLogDetail(detail: string | null): string | null {
+// actorName: 출입 기록은 detail에도 본인 이름을 남기므로, 행위자와 같으면 대상 이름을 다시 붙이지 않는다.
+function formatLogDetail(detail: string | null, actorName?: string | null): string | null {
   if (!detail) return null;
   try {
     const parsed = JSON.parse(detail) as Record<string, string>;
     const roleLabel =
       parsed.role === "master" ? "마스터" : parsed.role === "guest" ? "게스트" : parsed.role === "member" ? "멤버" : null;
-    const target = [parsed.display_name, roleLabel && `(${roleLabel})`].filter(Boolean).join(" ");
+    const targetName = parsed.display_name === actorName && !roleLabel ? null : parsed.display_name;
+    const target = [targetName, roleLabel && `(${roleLabel})`].filter(Boolean).join(" ");
     return [target, parsed.reason].filter(Boolean).join(" · ") || null;
   } catch {
     return detail;
@@ -2326,7 +2335,7 @@ export default function DeviceInfoView() {
                     {(log.display_name || log.detail) && (
                       <Text style={[styles.activityLogSub, { color: colors.tabIconDefault }]} numberOfLines={2}>
                         {Array.from(
-                          new Set([log.display_name, formatLogDetail(log.detail)].filter(Boolean)),
+                          new Set([log.display_name, formatLogDetail(log.detail, log.display_name)].filter(Boolean)),
                         ).join(" · ")}
                       </Text>
                     )}

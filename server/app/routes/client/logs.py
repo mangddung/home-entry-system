@@ -1,6 +1,7 @@
 import json
 
 from flask import Blueprint, request, jsonify
+from sqlalchemy import func
 
 from app.utils.database import database as _db
 from app.utils.database.models import ActivityLog, UserDeviceMapping
@@ -55,6 +56,14 @@ def get_logs():
             ActivityLog.device_uuid == device_uuid,
             ActivityLog.action.notin_(EXCLUDED_ACTIONS)
         )
+
+        # 리셋해도 device_uuid는 그대로라 이전 소유자·멤버의 로그가 남는다. DB엔 두고 마지막 리셋 이후만 보여준다.
+        last_reset_at = session.query(func.max(ActivityLog.created_at)).filter(
+            ActivityLog.device_uuid == device_uuid,
+            ActivityLog.action == "device_reset",
+        ).scalar()
+        if last_reset_at:
+            query = query.filter(ActivityLog.created_at > last_reset_at)
 
         # 마스터가 아니면 카테고리와 무관하게 본인 출입 기록만 본다(프런트 탭이 아니라 여기서 막는다)
         if mapping.role != "master":
