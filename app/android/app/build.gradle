@@ -107,15 +107,22 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        // 릴리스 키와 비밀번호는 저장소 밖 ~/.gradle/gradle.properties의 IOT_RELEASE_*에 둔다. 없으면 미서명 APK가 나온다.
+        release {
+            if (findProperty('IOT_RELEASE_STORE_FILE')) {
+                storeFile file(findProperty('IOT_RELEASE_STORE_FILE'))
+                storePassword findProperty('IOT_RELEASE_STORE_PASSWORD')
+                keyAlias findProperty('IOT_RELEASE_KEY_ALIAS')
+                keyPassword findProperty('IOT_RELEASE_KEY_PASSWORD')
+            }
+        }
     }
     buildTypes {
         debug {
             signingConfig signingConfigs.debug
         }
         release {
-            // Caution! In production, you need to generate your own keystore file.
-            // see https://reactnative.dev/docs/signed-apk-android.
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
             def enableShrinkResources = findProperty('android.enableShrinkResourcesInReleaseBuilds') ?: 'false'
             shrinkResources enableShrinkResources.toBoolean()
             minifyEnabled enableMinifyInReleaseBuilds

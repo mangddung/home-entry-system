@@ -7,10 +7,7 @@ wellknown_bp = Blueprint("wellknown", __name__)
 ANDROID_PACKAGE = os.environ.get("ANDROID_PACKAGE", "com.iotapp")
 ANDROID_CERT_FINGERPRINTS = [
     f.strip()
-    for f in os.environ.get(
-        "ANDROID_CERT_FINGERPRINTS",
-        "FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C",
-    ).split(",")
+    for f in os.environ.get("ANDROID_CERT_FINGERPRINTS", "").split(",")
     if f.strip()
 ]
 
