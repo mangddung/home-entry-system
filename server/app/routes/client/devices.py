@@ -158,6 +158,13 @@ def get_setup_token():
         if not device:
             return jsonify({"status": "error", "message": "invalid device"}), 400
 
+        # 등록된 기기는 마스터 본인만 다시 설정할 수 있다. UUID를 아는 사람(추방된 멤버 등)이
+        # 점유를 갱신해 재설정을 막거나 setup_token을 받아가지 못하게 한다.
+        master = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first()
+        if master and master.user_uuid != user_uuid:
+            return jsonify({"status": "error", "message": "forbidden"}), 403
+        registered = master is not None
+
         # 요청자를 master 후보로 점유한다. 다른 사용자가 점유 중(미만료)이면 거부.
         # 조건부 UPDATE 한 번으로 확인과 기록을 원자적으로 처리한다.
         now = datetime.utcnow()
@@ -174,7 +181,6 @@ def get_setup_token():
         session.commit()
         transport = device.transport
         setup_token = device.setup_token
-        registered = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first() is not None
 
     # Zigbee 모델은 기기가 이제 게이트웨이 네트워크에 가입해야 한다(앱이 곧 셋업 토큰을 BLE로 넘긴다).
     # 이미 등록된 기기로는 열지 않는다(아무 device_uuid로 가입 창을 여는 것을 막는다).

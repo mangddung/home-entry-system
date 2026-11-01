@@ -129,6 +129,17 @@ def setup_token(uid):
     return c.post("/client/setup-token", headers={"Authorization": "Bearer x"}, json={"device_uuid": DEV})
 
 
+# 등록된 기기는 마스터 본인만 받는다(추방된 멤버가 점유·토큰 획득을 못 하게)
+assert setup_token(B).status_code == 403
+assert setup_token(A).status_code == 200
+print("[ok] 등록된 기기는 마스터가 아니면 setup-token을 받지 못한다")
+
+# 이후는 미등록 기기(리셋 후) 기준
+with _db.Session() as s:
+    s.query(UserDeviceMapping).filter_by(device_uuid=DEV).delete()
+    s.query(DeviceManagement).filter_by(device_uuid=DEV).update({"setup_user_uuid": None, "setup_requested_at": None})
+    s.commit()
+
 assert setup_token(A).status_code == 200
 assert setup_token(B).status_code == 409
 print("[ok] 다른 사용자가 점유 중이면 setup-token 발급을 거부한다")
