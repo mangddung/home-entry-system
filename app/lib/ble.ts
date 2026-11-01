@@ -105,6 +105,8 @@ export type ScanOptions = {
   // 근접 해제: 광고 RSSI 중앙값이 문턱을 연속으로 넘을 때만 기기를 돌려준다(못 넘으면 빈 배열).
   // onTrigger는 넘은 순간의 중앙값으로 한 번 불린다.
   gate?: { threshold: number; onTrigger?: (rssi: number) => void };
+  // 자동 인증 디버그 로그용. 스캔·연결·nonce·전송 단계마다 한 줄씩 받는다(lib/auth-log.ts)
+  trace?: (message: string) => void;
 };
 
 export const scanDevice = async (
@@ -112,8 +114,10 @@ export const scanDevice = async (
   onDeviceFound?: (device: Device) => void,
   opts?: ScanOptions,
 ): Promise<Device[]> => {
+  const trace = opts?.trace;
   if (isScanning) {
     logDebug({ event_name: event_name, log_type: "DEBUG", message: "이미 스캔 중, 건너뜀" });
+    trace?.("스캔 건너뜀: 다른 스캔(화면의 BLE 디버그·보정·등록 등)이 진행 중");
     return [];
   }
 
@@ -126,12 +130,14 @@ export const scanDevice = async (
   const granted = await requestBluetoothPermission();
   if (!granted) {
     logDebug({ event_name: event_name, log_type: "WARNING", message: "BLE 권한 거부됨" });
+    trace?.("스캔 불가: 근처 기기/위치 권한 없음");
     return [];
   }
 
   const bleUuids = ioTDevice.ble_uuids;
   if (!bleUuids.ble_service_uuid || !bleUuids.ble_read_uuid || !bleUuids.ble_write_uuid) {
     logDebug({ event_name: event_name, log_type: "WARNING", message: "BLE UUID 누락" });
+    trace?.("스캔 불가: BLE UUID 누락");
     return [];
   }
 
@@ -139,6 +145,7 @@ export const scanDevice = async (
     await waitForPoweredOn(manager);
   } catch (e: any) {
     logDebug({ event_name: event_name, log_type: "WARNING", message: e.message });
+    trace?.(`스캔 불가: ${e.message}`);
     return [];
   }
 
@@ -156,33 +163,61 @@ export const scanDevice = async (
   const found = new Map<string, Device>();
   const gate = opts?.gate ? createGate(opts.gate.threshold) : null;
   let gated = false;
+  // 디버그 로그용 광고 통계
+  const startedAt = Date.now();
+  let samples = 0;
+  let maxRssi: number | null = null;
+  let lastRssi: number | null = null;
+  let firstSeenMs: number | null = null;
+  const mode = opts?.scanMode === ScanMode.LowLatency || opts?.scanMode == null ? "빠른" : "절전";
+  trace?.(`스캔 시작 (${mode} 모드, ${(opts?.timeoutMs ?? 30000) / 1000}초${gate ? `, 문턱 ${opts!.gate!.threshold}dBm` : ", 문턱 없음 = 발견 즉시"})`);
 
   return new Promise<Device[]>((resolve) => {
-    const scanTimeout = setTimeout(() => {
+    let done = false;
+    // 끝나는 경로(시간 초과·에러·발견·문턱 통과·stopScan)는 전부 여기로 모아 타임아웃을 함께 정리한다
+    const finish = (result: Device[], reason: string) => {
+      if (done) return;
+      done = true;
+      clearTimeout(scanTimeout);
       manager.stopDeviceScan();
       isScanning = false;
+      if (finishActiveScan === stopThis) finishActiveScan = null;
+      const stats = samples
+        ? `광고 ${samples}회, 최대 ${maxRssi}dBm, 마지막 ${lastRssi}dBm, 처음 발견 ${firstSeenMs}ms`
+        : "광고 수신 없음";
+      trace?.(`스캔 종료: ${reason} · ${Date.now() - startedAt}ms · ${stats}`);
+      resolve(result);
+    };
+    const stopThis = () => finish(gate ? [] : [...found.values()], "중지 요청");
+    finishActiveScan = stopThis;
+
+    const scanTimeout = setTimeout(() => {
       logDebug({
         event_name: event_name,
         log_type: "DEBUG",
         message: gate ? `근접 문턱 미달로 스캔 종료 (${found.size}개 발견)` : `스캔 완료: ${found.size}개 발견`,
       });
       // 게이트 사용 시 발견만 하고 문턱을 못 넘었으면 연결하지 않는다
-      resolve(gate ? [] : [...found.values()]);
+      finish(gate ? [] : [...found.values()], gate ? (samples ? "문턱 미달 시간 초과" : "미발견 시간 초과") : "시간 초과");
     }, opts?.timeoutMs ?? 30000);
 
     // 게이트는 같은 기기의 광고를 반복해서 받아야 한다(iOS는 allowDuplicates 필요, Android는 LowLatency에서 매번 콜백)
     manager.startDeviceScan([bleUuids.ble_service_uuid], { scanMode: opts?.scanMode ?? ScanMode.LowLatency, allowDuplicates: !!gate }, async (error, device) => {
+      if (done) return;
       if (error) {
-        clearTimeout(scanTimeout);
-        manager.stopDeviceScan();
-        isScanning = false;
         logDebug({
           event_name: event_name,
           log_type: "WARNING",
           message: `스캔 에러: ${error.message}`,
         });
-        resolve([]);
+        finish([], `스캔 에러: ${error.message}`);
         return;
+      }
+      if (device?.rssi != null) {
+        samples++;
+        lastRssi = device.rssi;
+        maxRssi = maxRssi == null ? device.rssi : Math.max(maxRssi, device.rssi);
+        if (firstSeenMs == null) firstSeenMs = Date.now() - startedAt;
       }
       if (device && gate) {
         found.set(device.id, device);
@@ -190,12 +225,9 @@ export const scanDevice = async (
         const hit = gate(device.rssi);
         if (hit == null) return;
         gated = true;
-        clearTimeout(scanTimeout);
-        manager.stopDeviceScan();
-        isScanning = false;
         logDebug({ event_name, log_type: "DEBUG", message: `근접 트리거: RSSI ${hit} ≥ ${opts!.gate!.threshold}` });
         opts!.gate!.onTrigger?.(hit);
-        resolve([device]);
+        finish([device], `문턱 통과 (중앙값 ${hit}dBm ≥ ${opts!.gate!.threshold}dBm)`);
         return;
       }
       if (device) {
@@ -208,10 +240,7 @@ export const scanDevice = async (
             message: `디바이스 발견: ${device.id}`,
           });
           if (!onDeviceFound) {
-            clearTimeout(scanTimeout);
-            manager.stopDeviceScan();
-            isScanning = false;
-            resolve([...found.values()]);
+            finish([...found.values()], `발견 (RSSI ${device.rssi ?? "?"}dBm)`);
             return;
           }
         }
@@ -257,6 +286,8 @@ export const connectDevice = async (
     return connected;
   } catch (e: any) {
     logDebug({ event_name, log_type: "WARNING", message: `서비스 탐색 실패: ${e.message}` });
+    // 연결은 된 상태라 직접 끊는다(ESP는 연결 하나만 받으므로 남겨 두면 다음 시도에서 안 보인다)
+    await connected.cancelConnection().catch(() => {});
     return null;
   }
 };
@@ -272,11 +303,27 @@ export const triggerPairing = async (device: Device, ioTDevice: IoTDevice): Prom
   }
 };
 
+// nonce 알림 대기 상한. 펌웨어 nonce 유효 시간(8초)보다 조금 길게 잡는다.
+// 상한이 없으면 알림이 안 올 때(본딩 풀림 등) 펌웨어가 연결을 끊을 때까지 루프가 멈춘다.
+const NONCE_TIMEOUT_MS = 10000;
+
 // 기기 선택 시 GATT 임시 연결 + 키 교환
+// 구독은 따로 해제하지 않는다(해제가 펌웨어 nonce 상태에 영향을 줄 수 있다). 연결을 끊으면 함께 정리된다.
 export const receiveData = (connected: Device, ioTDevice: IoTDevice): Promise<string | null> => {
   const bleUuids = ioTDevice.ble_uuids;
 
   return new Promise((resolve) => {
+    let done = false;
+    const finish = (nonce: string | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(nonce);
+    };
+    const timer = setTimeout(() => {
+      logDebug({ event_name: event_name, log_type: "WARNING", message: "nonce 수신 시간 초과" });
+      finish(null);
+    }, NONCE_TIMEOUT_MS);
     try {
       logDebug({ event_name: event_name, log_type: "DEBUG", message: "연결됨 - 키 교환 중..." });
       connected.monitorCharacteristicForService(
@@ -284,7 +331,7 @@ export const receiveData = (connected: Device, ioTDevice: IoTDevice): Promise<st
         bleUuids.ble_read_uuid as string,
         (err, char) => {
           if (err || !char?.value) {
-            resolve(null);
+            finish(null);
             return;
           }
           const nonce = Buffer.from(char.value, "base64").toString("utf-8");
@@ -293,12 +340,12 @@ export const receiveData = (connected: Device, ioTDevice: IoTDevice): Promise<st
             log_type: "DEBUG",
             message: `Nonce received: ${nonce}`,
           });
-          resolve(nonce);
+          finish(nonce);
         },
       );
     } catch (e: any) {
       logDebug({ event_name: event_name, log_type: "DEBUG", message: "nonce 수신 실패" });
-      resolve(null);
+      finish(null);
     }
   });
 };
@@ -440,18 +487,42 @@ const writeSetupPayload = async (connected: any, ioTDevice: IoTDevice, payload: 
     logDebug({
       event_name: event_name,
       log_type: "WARNING",
-      message: `WIfi 셋업 전송 실패: ${e}`,
+      message: `셋업 정보 전송 실패: ${e}`,
     });
     return false;
   }
 };
 
 export const userTokenExchange = async (ioTDevice: IoTDevice, opts?: ScanOptions): Promise<boolean> => {
+  const trace = opts?.trace;
+  const t0 = Date.now();
   const devices = await scanDevice(ioTDevice, undefined, opts);
   if (!devices.length) return false;
+  const tScan = Date.now();
+  trace?.(`연결 시도 (RSSI ${devices[0].rssi ?? "?"}dBm)`);
   const connected = await connectDevice(devices[0]);
-  if (!connected) return false;
-  const nonce = await receiveData(connected, ioTDevice);
-  if (nonce == null) return false;
-  return await sendUserAuthToken(connected, ioTDevice, nonce);
+  if (!connected) {
+    trace?.(`연결 실패 (${Date.now() - tScan}ms)`);
+    return false;
+  }
+  const tConn = Date.now();
+  let sent = false;
+  try {
+    const nonce = await receiveData(connected, ioTDevice);
+    if (nonce == null) {
+      trace?.(`nonce 수신 실패 또는 ${NONCE_TIMEOUT_MS / 1000}초 초과 (연결 ${tConn - tScan}ms)`);
+      return false;
+    }
+    const tNonce = Date.now();
+    sent = await sendUserAuthToken(connected, ioTDevice, nonce);
+    trace?.(
+      sent
+        ? `응답값 전송 완료 · 스캔 ${tScan - t0}ms / 연결 ${tConn - tScan}ms / nonce ${tNonce - tConn}ms / 전송 ${Date.now() - tNonce}ms`
+        : "응답값 전송 실패",
+    );
+    return sent;
+  } finally {
+    // 실패하면 직접 끊는다. 남겨 두면 ESP 인증 타이머가 끊을 때까지 단일 연결을 점유해 광고가 멈추고 다음 스캔에서 안 보인다.
+    if (!sent) await connected.cancelConnection().catch(() => {});
+  }
 };

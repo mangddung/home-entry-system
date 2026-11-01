@@ -247,6 +247,15 @@ export default function SettingsScreen() {
               textColor={colors.text}
               onPress={() => router.push("/system-log-view")}
             />
+            <View style={[styles.divider, { backgroundColor: dividerColor }]} />
+            <SettingRow
+              icon="door-sliding-lock"
+              iconColor="#fff"
+              iconBg="#16a34a"
+              label="자동 인증 로그"
+              textColor={colors.text}
+              onPress={() => router.push({ pathname: "/system-log-view", params: { tab: "auth" } })}
+            />
           </View>
         </View>
 

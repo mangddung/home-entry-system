@@ -1,11 +1,4 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-  <!-- API 29+는 런타임 권한, 28 이하는 Play Services 권한 -->
+  <!-- 걸음 센서(TYPE_STEP_COUNTER)는 API 29+에서 이 런타임 권한이 있어야 값을 준다 -->
   <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
-  <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
-
-  <application>
-    <receiver
-      android:name="expo.modules.activitytransition.ActivityTransitionReceiver"
-      android:exported="false" />
-  </application>
 </manifest>

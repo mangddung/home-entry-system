@@ -13,8 +13,3 @@ android {
     versionName '0.1.0'
   }
 }
-
-dependencies {
-  // expo-location과 같은 버전 (expo-location/android/build.gradle)
-  implementation 'com.google.android.gms:play-services-location:21.0.1'
-}

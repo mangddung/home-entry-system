@@ -1,7 +1,7 @@
 // 등록된 기기 위치마다 고정 반경(GEOFENCE_RADIUS_M) geofence를 걸고,
 // 진입 이벤트가 오면 BLE 스캔으로 실제 근접 판정을 넘긴다.
 
-import notifee, { AndroidImportance } from "@notifee/react-native";
+import notifee, { AndroidForegroundServiceType, AndroidImportance } from "@notifee/react-native";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import { loadDevices } from "./api/devices";
@@ -10,6 +10,7 @@ import {
   BG_LOCATION_TASK,
   GEOFENCE_RADIUS_M,
 } from "./constants";
+import { authLog, short } from "./auth-log";
 import { appendSystemLog } from "./system-log";
 import { IoTDevice } from "./types";
 
@@ -130,7 +131,8 @@ let watchedDeviceCount: number | null = null;
 const bleScanning = new Map<string, BleScanMode>();
 
 // 트래킹 중임을 알리는 고정 알림 (같은 id로 다시 그리면 갱신된다)
-const renderTrackingNotification = async () => {
+// asForegroundService: 이 알림으로 포그라운드 서비스를 시작한다(startTrackingService에서만).
+const renderTrackingNotification = async (asForegroundService = false) => {
   const channelId = await notifee.createChannel({
     id: "tracking",
     name: "위치 트래킹",
@@ -147,8 +149,53 @@ const renderTrackingNotification = async () => {
         : watchedDeviceCount === null
           ? "등록된 기기의 주변 진입을 감시하고 있습니다"
           : `등록된 기기 ${watchedDeviceCount}개의 주변 진입을 감시하고 있습니다`,
-    android: { channelId, ongoing: true, onlyAlertOnce: true, pressAction: { id: "default" } },
+    // 그룹을 따로 지정해야 Android 자동 묶음에 안 들어간다. 묶음에 ongoing 알림이 끼면
+    // 묶음 요약까지 ongoing이 돼서 같이 묶인 일반 알림이 "모두 지우기"로 안 지워진다.
+    android: {
+      channelId, groupId: "tracking", ongoing: true, onlyAlertOnce: true, pressAction: { id: "default" },
+      ...(asForegroundService && {
+        asForegroundService: true,
+        foregroundServiceTypes: [AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_LOCATION],
+      }),
+    },
   });
+};
+
+// BLE 트래킹 루프가 도는 동안 트래킹 알림을 포그라운드 서비스로 올린다.
+// 백그라운드에서는 RN이 JS 타이머(setTimeout)를 멈춰 스캔 타임아웃·재시도 대기·연결 후 대기에서 루프가 멈춘다.
+// notifee 포그라운드 서비스는 Headless JS 태스크로 돌아 그동안은 타이머가 정상 동작한다.
+// Android 12+ 백그라운드 시작 제한의 예외는 지오펜스 이벤트 직후뿐이라 서비스는 루프 시작 때 한 번만 올리고,
+// 이후 문구 갱신은 같은 id의 일반 표시로 한다.
+let serviceActive = false;
+let releaseService: (() => void) | null = null;
+notifee.registerForegroundService(
+  () =>
+    new Promise<void>((resolve) => {
+      if (!serviceActive) return resolve(); // 러너가 뜨기 전에 이미 멈췄으면 태스크를 바로 끝낸다
+      releaseService = resolve;
+    }),
+);
+
+export const startTrackingService = async () => {
+  if (serviceActive) return;
+  serviceActive = true;
+  try {
+    await renderTrackingNotification(true);
+    authLog("SERVICE", "포그라운드 서비스 시작 (백그라운드 타이머 유지)");
+  } catch (e) {
+    serviceActive = false;
+    throw e;
+  }
+};
+
+// 서비스를 내리면 알림도 사라지므로 호출한 쪽에서 다시 그린다(setBleScanning).
+export const stopTrackingService = async () => {
+  if (!serviceActive) return;
+  serviceActive = false;
+  releaseService?.();
+  releaseService = null;
+  await notifee.stopForegroundService();
+  authLog("SERVICE", "포그라운드 서비스 종료");
 };
 
 const showTrackingNotification = async (count: number) => {
@@ -208,10 +255,19 @@ export const updateGeoFence = async () => {
       log_type: "INFO",
       message: `updated geofences: ${geoFences.length}`,
     });
+    authLog("GEOFENCE", `등록 ${geoFences.length}개 (반경 ${GEOFENCE_RADIUS_M}m): ${geoFences.map((g) => short(g.identifier)).join(", ")}`);
   } else {
     await cancelTrackingNotification();
+    authLog("GEOFENCE", "등록 해제: 자동 인증 대상 기기 없음(좌표 없음·게스트만)");
   }
   lastGeoFenceSignature = signature;
+};
+
+// OS가 지오펜스를 지웠을 때(위치 끄기/켜기 → GEOFENCE_NOT_AVAILABLE 등) 같은 목록이어도 다시 등록한다.
+// 시그니처 캐시가 같으면 updateGeoFence가 건너뛰어 프로세스가 재시작될 때까지 감시가 멈춘다.
+export const reregisterGeoFence = async () => {
+  lastGeoFenceSignature = "";
+  await updateGeoFence();
 };
 
 // 로그아웃 시 백그라운드 추적을 전부 내린다.

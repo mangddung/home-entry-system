@@ -65,7 +65,9 @@ def _notify_auth_denied(session, user_uuid, device_uuid, reason):
     display  = mapping.display_name if mapping else user_uuid
     log_activity("token_denied", user_uuid=user_uuid, device_uuid=device_uuid,
                  detail={"display_name": display, "reason": reason})
-    send_to_user(user_uuid, f"{nickname} 기기 알림", f"인증 실패 — {reason}")
+    # data: 앱 자동 인증 로그가 서버 거부 결과를 기기·사유별로 남기는 데 쓴다(app/lib/app-handlers.ts)
+    send_to_user(user_uuid, f"{nickname} 기기 알림", f"인증 실패 — {reason}",
+                 data={"event": "unlock_denied", "device_uuid": device_uuid, "reason": reason})
 
 
 # POST /iot/init
