@@ -306,10 +306,16 @@ export const triggerPairing = async (device: Device, ioTDevice: IoTDevice): Prom
 // nonce 알림 대기 상한. 펌웨어 nonce 유효 시간(8초)보다 조금 길게 잡는다.
 // 상한이 없으면 알림이 안 올 때(본딩 풀림 등) 펌웨어가 연결을 끊을 때까지 루프가 멈춘다.
 const NONCE_TIMEOUT_MS = 10000;
+// 셋업 결과 대기 상한. 펌웨어 Zigbee 가입 60초 + 서버 응답 60초(ZB_SETUP_JOIN_MS, ZB_SETUP_SERVER_MS)보다 길게 잡는다.
+export const SETUP_RESULT_TIMEOUT_MS = 130000;
 
 // 기기 선택 시 GATT 임시 연결 + 키 교환
 // 구독은 따로 해제하지 않는다(해제가 펌웨어 nonce 상태에 영향을 줄 수 있다). 연결을 끊으면 함께 정리된다.
-export const receiveData = (connected: Device, ioTDevice: IoTDevice): Promise<string | null> => {
+export const receiveData = (
+  connected: Device,
+  ioTDevice: IoTDevice,
+  timeoutMs: number = NONCE_TIMEOUT_MS,
+): Promise<string | null> => {
   const bleUuids = ioTDevice.ble_uuids;
 
   return new Promise((resolve) => {
@@ -323,7 +329,7 @@ export const receiveData = (connected: Device, ioTDevice: IoTDevice): Promise<st
     const timer = setTimeout(() => {
       logDebug({ event_name: event_name, log_type: "WARNING", message: "nonce 수신 시간 초과" });
       finish(null);
-    }, NONCE_TIMEOUT_MS);
+    }, timeoutMs);
     try {
       logDebug({ event_name: event_name, log_type: "DEBUG", message: "연결됨 - 키 교환 중..." });
       connected.monitorCharacteristicForService(

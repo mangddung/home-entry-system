@@ -2,7 +2,7 @@ import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { showAlert } from "@/lib/alert";
 import { fetchDeviceSetupToken, fetchSetupUuid, loadDevices } from "@/lib/api/devices";
-import { advertisedModel, connectDevice, receiveData, scanDevice, sendSetupCode, sendWifiSetup, sendZigbeeSetup, stopScan, triggerPairing } from "@/lib/ble";
+import { SETUP_RESULT_TIMEOUT_MS, advertisedModel, connectDevice, receiveData, scanDevice, sendSetupCode, sendWifiSetup, sendZigbeeSetup, stopScan, triggerPairing } from "@/lib/ble";
 import { commitBond, dropPendingBond, markPendingBond, resetBond } from "@/lib/bond";
 import NetInfo from "@react-native-community/netinfo";
 import { DEVICE_SETUP_KEY, MAX_DEVICES_PER_USER, UNFIGURED_DEVICES_KEY } from "@/lib/constants";
@@ -520,7 +520,7 @@ export default function DeviceSetupScreen() {
               if (receiveResponse != "ACK") {
                 console.log("not received");
               }
-              const apiResponse = await receiveData(connected!, setupDevice!);
+              const apiResponse = await receiveData(connected!, setupDevice!, SETUP_RESULT_TIMEOUT_MS);
               setIsSubmitting(false);
               await finishRegistration(apiResponse);
             }}
@@ -749,7 +749,7 @@ export default function DeviceSetupScreen() {
                 if (receiveResponse != "ACK") {
                   console.log("not received");
                 }
-                const apiResponse = await receiveData(connected!, setupDevice!);
+                const apiResponse = await receiveData(connected!, setupDevice!, SETUP_RESULT_TIMEOUT_MS);
                 setIsSubmitting(false);
                 await finishRegistration(apiResponse);
               }}
