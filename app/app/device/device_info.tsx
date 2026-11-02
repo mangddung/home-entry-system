@@ -1,11 +1,11 @@
 import { AlertButton, CustomAlert } from "@/components/custom-alert";
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
-import { deleteDevice, deleteMemberShip, fetchDevices, loadDevices, updateDeviceName } from "@/lib/api/devices";
-import { unbondDevice } from "@/lib/bond";
+import { fetchDevices, loadDevices } from "@/lib/api/devices";
 import { fetchDeviceLogs, type DeviceLog } from "@/lib/api/logs";
 import { userTokenExchange } from "@/lib/ble";
-import { noteManualUnlock } from "@/lib/proximity";
+import { loadCalibrations, noteManualUnlock } from "@/lib/proximity";
+import { effectiveThreshold, type Calibration } from "@/lib/proximity-rules";
 import {
   createGuestToken,
   buildInviteUrl,
@@ -365,9 +365,6 @@ export default function DeviceInfoView() {
   const [inviteRole, setInviteRole] = useState<"member" | "guest">("member");
   const [inviteWithToken, setInviteWithToken] = useState(false);
 
-  const [isNicknameModalOpen, setIsNicknameModalOpen] = useState(false);
-  const [nicknameInput, setNicknameInput] = useState("");
-
   const [guestTokenTarget, setGuestTokenTarget] = useState<MemberInfo | null>(null);
   const [guestTokenMaxUses, setGuestTokenMaxUses] = useState(1);
   const [guestTokenExpireValue, setGuestTokenExpireValue] = useState("3");
@@ -401,6 +398,7 @@ export default function DeviceInfoView() {
   const [myTokens, setMyTokens] = useState<typeof selectedMemberTokens>([]);
   const [myTokensLoading, setMyTokensLoading] = useState(false);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [calibration, setCalibration] = useState<Calibration | null | undefined>(undefined); // undefined = 로딩 중
 
   const [isActivityLogOpen, setIsActivityLogOpen] = useState(false);
   const [activityLogs, setActivityLogs] = useState<DeviceLog[]>([]);
@@ -537,12 +535,8 @@ export default function DeviceInfoView() {
     }
   };
 
-  const [deleteVisible, setDeleteVisible] = useState(false);
-  const [leaveCountdown, setLeaveCountdown] = useState(0);
   // 만료까지 남은 시간 표시를 30초마다 갱신한다(getTimeLeft는 렌더 시점에 계산된다).
   const [, setExpiryTick] = useState(0);
-  const [confirmInput, setConfirmInput] = useState("");
-  const [isDeleting, setIsDeleting] = useState(false);
 
   const [alertConfig, setAlertConfig] = useState<{
     title: string;
@@ -551,22 +545,8 @@ export default function DeviceInfoView() {
   } | null>(null);
   const showAlert = (title: string, message?: string, buttons?: AlertButton[]) =>
     setAlertConfig({ title, message, buttons });
-  // 내가 삭제·탈퇴 중이면 서버 푸시가 응답보다 먼저 와도 "접근 불가" 알림을 띄우지 않는다
-  const selfRemovingRef = useRef(false);
   // 추방·삭제로 기기가 목록에서 빠짐 → 알림을 어떻게 닫든 홈으로 보낸다
   const deviceGoneRef = useRef(false);
-
-  const handleNicknameConfirm = async () => {
-    if (!device || !nicknameInput.trim()) return;
-    const result = await updateDeviceName(device.device_uuid, nicknameInput.trim());
-    if (result.type === "success") {
-      setDevice((prev) => (prev ? { ...prev, device_nickname: nicknameInput.trim() } : prev));
-      setIsNicknameModalOpen(false);
-      setNicknameInput("");
-    } else {
-      showAlert("오류", result.message ?? "오류가 발생했습니다.");
-    }
-  };
 
   const openLogModal = async () => {
     if (!device) return;
@@ -680,7 +660,7 @@ export default function DeviceInfoView() {
       setIsOnline((await fetchDevices()).type === "success");
       const latest = (await loadDevices()).find((d) => d.device_uuid === device_uuid);
       if (!latest) {
-        if (!selfRemovingRef.current && !deviceGoneRef.current) {
+        if (!deviceGoneRef.current) {
           deviceGoneRef.current = true;
           setAlertConfig({ title: "기기 접근 불가", message: "기기가 삭제되었거나 그룹에서 추방되었습니다." });
         }
@@ -702,6 +682,18 @@ export default function DeviceInfoView() {
       subscription.remove();
     };
   }, [isFocused, device?.device_uuid, device?.role, myUuid, refreshMembers]);
+
+  // 설정·보정 화면에서 바꾼 별명과 보정값을 돌아오자마자 반영한다(주기 갱신은 30초 뒤)
+  useEffect(() => {
+    if (!isFocused || !device?.device_uuid) return;
+    const device_uuid = device.device_uuid;
+    void (async () => {
+      const [devices, calibrations] = await Promise.all([loadDevices(), loadCalibrations()]);
+      const latest = devices.find((d) => d.device_uuid === device_uuid);
+      if (latest) setDevice((prev) => (JSON.stringify(prev) === JSON.stringify(latest) ? prev : latest));
+      setCalibration(calibrations[device_uuid] ?? null);
+    })();
+  }, [isFocused, device?.device_uuid]);
 
   useEffect(() => {
     void refreshMembers();
@@ -1185,22 +1177,6 @@ export default function DeviceInfoView() {
     </>
   );
 
-  // 탈퇴 모달은 실수 방지를 위해 2초 뒤에 버튼이 활성화된다.
-  useEffect(() => {
-    if (!deleteVisible || device?.role === "master") return;
-    setLeaveCountdown(2);
-    const timer = setInterval(() => {
-      setLeaveCountdown((v) => {
-        if (v <= 1) {
-          clearInterval(timer);
-          return 0;
-        }
-        return v - 1;
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [deleteVisible, device?.role]);
-
   if (isLoading) {
     return (
       <SafeAreaView
@@ -1225,21 +1201,16 @@ export default function DeviceInfoView() {
   }
 
   const myRole = getRoleStyle(device.role, isDark);
+  // 내 보정도 기기 기준도 없으면 근접 해제가 기기를 발견하는 즉시 동작한다. 게스트는 수동 전용이라 해당 없음.
+  const needsCalibration =
+    device.role !== "guest" &&
+    calibration !== undefined &&
+    effectiveThreshold(calibration ?? undefined, device.rssi_threshold) == null;
   // 서버의 is_active는 조회 시점 값이라 화면을 열어둔 채 만료되면 갱신되지 않는다.
   // 만료 여부는 렌더할 때마다 직접 계산한다(30초 tick이 재렌더를 유발).
   const hasActiveToken = selectedMemberTokens.some(
     (t) => !!t.expired_at && new Date(t.expired_at).getTime() > Date.now(),
   );
-
-  const remainingUses = myTokens.reduce(
-    (sum, t) => sum + Math.max(0, (t.max_uses ?? 0) - t.use_count),
-    0,
-  );
-  const hasUnlimitedToken = myTokens.some((t) => t.max_uses == null && t.is_active);
-  const canConfirmLeave =
-    device.role === "master"
-      ? confirmInput === device.device_uuid.slice(0, 8)
-      : leaveCountdown === 0;
 
   // 서버 미연결이면 캐시된 last_ping_at이 낡았으므로 기기 상태를 판단하지 않는다(수동 인증은 BLE만 쓰므로 막지 않음)
   const pingColor = isOnline ? getPingColor(device.last_ping_at) : "#9ca3af";
@@ -1278,19 +1249,6 @@ export default function DeviceInfoView() {
               </Text>
             </View>
             <View style={styles.cardActions}>
-              <TouchableOpacity
-                style={[styles.cardActionBtn, { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" }]}
-                onPress={() => {
-                  setNicknameInput(device.device_nickname ?? "");
-                  setIsNicknameModalOpen(true);
-                }}
-              >
-                <MaterialCommunityIcons
-                  name="pencil-outline"
-                  size={15}
-                  color={colors.tabIconDefault}
-                />
-              </TouchableOpacity>
               {!!device.auth_token && (
                 <TouchableOpacity
                   style={[
@@ -1311,17 +1269,11 @@ export default function DeviceInfoView() {
                 </TouchableOpacity>
               )}
               <TouchableOpacity
-                style={[
-                  styles.cardActionBtn,
-                  { backgroundColor: isDark ? "rgba(239,68,68,0.12)" : "#FEF2F2" },
-                ]}
-                onPress={() => setDeleteVisible(true)}
+                style={[styles.cardActionBtn, { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" }]}
+                accessibilityLabel="기기 설정"
+                onPress={() => router.push({ pathname: "/device/device_setting", params: { device_uuid: device.device_uuid } })}
               >
-                <MaterialCommunityIcons
-                  name={device.role === "master" ? "delete-outline" : "logout-variant"}
-                  size={15}
-                  color="#EF4444"
-                />
+                <MaterialCommunityIcons name="cog-outline" size={15} color={colors.tabIconDefault} />
               </TouchableOpacity>
             </View>
           </View>
@@ -1354,6 +1306,21 @@ export default function DeviceInfoView() {
           </View>
         </View>
 
+        {needsCalibration && (
+          <TouchableOpacity
+            style={styles.calibrationBanner}
+            activeOpacity={0.8}
+            onPress={() => router.push({ pathname: "/device/rssi-calibrate", params: { device_uuid: device.device_uuid } })}
+          >
+            <MaterialCommunityIcons name="signal-distance-variant" size={22} color="#D97706" />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={styles.calibrationBannerTitle}>열림 거리 보정을 하지 않았습니다</Text>
+              <Text style={styles.calibrationBannerSub}>보정 전에는 기기를 발견하면 바로 열립니다</Text>
+            </View>
+            <MaterialCommunityIcons name="chevron-right" size={20} color="#D97706" />
+          </TouchableOpacity>
+        )}
+
         {/* 위치 섹션 */}
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>위치</Text>
@@ -1385,26 +1352,6 @@ export default function DeviceInfoView() {
             </View>
           )}
         </View>
-
-        {/* 근접 해제 보정 (게스트는 수동 전용이라 제외) */}
-        {device.role !== "guest" && (
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>근접 해제</Text>
-            <TouchableOpacity
-              style={[styles.proximityRow, { backgroundColor: cardBg, borderColor: cardBorder }]}
-              onPress={() => router.push({ pathname: "/device/rssi-calibrate", params: { device_uuid: device.device_uuid } })}
-            >
-              <MaterialCommunityIcons name="signal-distance-variant" size={20} color="#16a34a" />
-              <View style={{ flex: 1, gap: 2 }}>
-                <Text style={[styles.proximityTitle, { color: colors.text }]}>열림 거리 보정</Text>
-                <Text style={[styles.proximitySub, { color: colors.tabIconDefault }]}>
-                  기기 기준 {device.rssi_threshold != null ? `${device.rssi_threshold} dBm` : "미설정 (발견 즉시 열림)"}
-                </Text>
-              </View>
-              <MaterialCommunityIcons name="chevron-right" size={18} color={colors.tabIconDefault} />
-            </TouchableOpacity>
-          </View>
-        )}
 
         {/* 내 토큰 섹션 (마스터 제외) */}
         {device.role !== "master" && (
@@ -1895,204 +1842,6 @@ export default function DeviceInfoView() {
         </Pressable>
       </Modal>
 
-      {/* 별명 설정 모달 */}
-      <Modal
-        visible={isNicknameModalOpen}
-        transparent
-        animationType="fade"
-        onRequestClose={() => {
-          setIsNicknameModalOpen(false);
-          setNicknameInput("");
-        }}
-      >
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
-        >
-          <Pressable
-            style={styles.modalBackdrop}
-            onPress={() => {
-              setIsNicknameModalOpen(false);
-              setNicknameInput("");
-            }}
-          >
-            <Pressable style={[styles.modalBox, { backgroundColor: modalBg }]}>
-              <View style={styles.modalHeader}>
-                <MaterialCommunityIcons name="pencil-outline" size={22} color={colors.tint} />
-                <Text style={[styles.modalTitle, { color: colors.text }]}>기기 별명 설정</Text>
-              </View>
-              <View style={styles.modalField}>
-                <Text style={[styles.modalFieldLabel, { color: colors.tabIconDefault }]}>별명</Text>
-                <TextInput
-                  style={[
-                    styles.modalInput,
-                    {
-                      color: colors.text,
-                      backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
-                      borderColor: cardBorder,
-                    },
-                  ]}
-                  placeholder="별명을 입력하세요"
-                  value={nicknameInput}
-                  onChangeText={setNicknameInput}
-                  autoFocus
-                  placeholderTextColor={colors.tabIconDefault}
-                  maxLength={30}
-                />
-              </View>
-              <View style={styles.modalFooter}>
-                <TouchableOpacity
-                  style={[
-                    styles.modalBtnSecondary,
-                    { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" },
-                  ]}
-                  onPress={() => {
-                    setIsNicknameModalOpen(false);
-                    setNicknameInput("");
-                  }}
-                >
-                  <Text style={[styles.modalBtnSecondaryText, { color: colors.tabIconDefault }]}>
-                    취소
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.modalBtnPrimary,
-                    { backgroundColor: nicknameInput.trim() ? "#3B82F6" : "#9CA3AF" },
-                  ]}
-                  disabled={!nicknameInput.trim()}
-                  onPress={handleNicknameConfirm}
-                >
-                  <Text style={styles.modalBtnPrimaryText}>확인</Text>
-                </TouchableOpacity>
-              </View>
-            </Pressable>
-          </Pressable>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* 기기 삭제 모달 */}
-      <Modal
-        visible={deleteVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => {
-          setDeleteVisible(false);
-          setConfirmInput("");
-        }}
-      >
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
-        >
-          <Pressable
-            style={styles.modalBackdrop}
-            onPress={() => {
-              setDeleteVisible(false);
-              setConfirmInput("");
-            }}
-          >
-            <Pressable style={[styles.modalBox, { backgroundColor: modalBg }]}>
-              <View style={styles.modalHeader}>
-                <MaterialCommunityIcons
-                  name={device.role === "master" ? "delete-outline" : "logout-variant"}
-                  size={22}
-                  color="#EF4444"
-                />
-                <Text style={[styles.modalTitle, { color: colors.text }]}>
-                  {device.role === "master" ? "기기 삭제" : "기기 탈퇴"}
-                </Text>
-              </View>
-              {device.role === "master" ? (
-                <>
-                  <Text style={[styles.deleteGuide, { color: colors.tabIconDefault }]}>
-                    확인을 위해 기기 ID 앞 8자리를 입력해 주세요
-                  </Text>
-                  <Text style={[styles.deleteHint, { color: colors.text }]}>
-                    {device.device_uuid.slice(0, 8)}
-                  </Text>
-                  <TextInput
-                    style={[
-                      styles.modalInput,
-                      {
-                        color: colors.text,
-                        backgroundColor: isDark ? "#2A2D31" : "#F9FAFB",
-                        borderColor: cardBorder,
-                      },
-                    ]}
-                    value={confirmInput}
-                    onChangeText={setConfirmInput}
-                    placeholder="앞 8자리 입력"
-                    placeholderTextColor={colors.tabIconDefault}
-                    maxLength={8}
-                    autoCapitalize="none"
-                  />
-                </>
-              ) : (
-                <Text style={[styles.deleteGuide, { color: colors.tabIconDefault }]}>
-                  {hasUnlimitedToken
-                    ? "아직 사용 가능한 토큰이 남아 있습니다. 탈퇴하면 토큰과 기기 접근 권한이 삭제되며 다시 초대받아야 합니다."
-                    : remainingUses > 0
-                    ? `아직 ${remainingUses}회 사용 가능한 토큰이 남아 있습니다. 탈퇴하면 토큰과 기기 접근 권한이 삭제되며 다시 초대받아야 합니다.`
-                    : "탈퇴하면 기기 접근 권한이 삭제되며 다시 초대받아야 합니다."}
-                </Text>
-              )}
-              <View style={styles.modalFooter}>
-                <TouchableOpacity
-                  style={[
-                    styles.modalBtnSecondary,
-                    { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" },
-                  ]}
-                  onPress={() => {
-                    setDeleteVisible(false);
-                    setConfirmInput("");
-                  }}
-                >
-                  <Text style={[styles.modalBtnSecondaryText, { color: colors.tabIconDefault }]}>
-                    취소
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.modalBtnPrimary,
-                    { backgroundColor: canConfirmLeave ? "#EF4444" : "#9CA3AF" },
-                  ]}
-                  disabled={!canConfirmLeave || isDeleting}
-                  onPress={async () => {
-                    setIsDeleting(true);
-                    selfRemovingRef.current = true;
-                    const result =
-                      device.role === "master"
-                        ? await deleteDevice(device.device_uuid)
-                        : await deleteMemberShip(device.device_uuid);
-                    setIsDeleting(false);
-                    if (result?.type === "success") {
-                      await unbondDevice(device.device_uuid);
-                      setDeleteVisible(false);
-                      router.push("/home");
-                    } else {
-                      selfRemovingRef.current = false;
-                      showAlert("삭제 실패", result?.message ?? "오류가 발생했습니다.");
-                    }
-                  }}
-                >
-                  {isDeleting ? (
-                    <ActivityIndicator color="#fff" />
-                  ) : (
-                    <Text style={styles.modalBtnPrimaryText}>
-                      {device.role === "master"
-                        ? "삭제"
-                        : leaveCountdown > 0
-                          ? `나가기 (${leaveCountdown})`
-                          : "나가기"}
-                    </Text>
-                  )}
-                </TouchableOpacity>
-              </View>
-            </Pressable>
-          </Pressable>
-        </KeyboardAvoidingView>
-      </Modal>
       {/* 게스트 토큰 발급 모달 */}
       <Modal
         visible={!!guestTokenTarget}
@@ -2497,20 +2246,25 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: -0.2,
   },
-  proximityRow: {
+  // 홈 화면 setupBanner와 같은 안내 스타일
+  calibrationBanner: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    padding: 14,
-    borderRadius: 12,
+    gap: 10,
+    backgroundColor: "#FEF3C7",
     borderWidth: 1,
+    borderColor: "#FDE68A",
+    borderRadius: 14,
+    padding: 14,
   },
-  proximityTitle: {
-    fontSize: 14,
+  calibrationBannerTitle: {
+    fontSize: 13,
     fontWeight: "600",
+    color: "#92400E",
   },
-  proximitySub: {
+  calibrationBannerSub: {
     fontSize: 12,
+    color: "#92400E",
   },
   sectionActions: {
     flexDirection: "row",
@@ -2875,16 +2629,6 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-  },
-  deleteGuide: {
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  deleteHint: {
-    fontSize: 15,
-    fontWeight: "700",
-    fontFamily: "monospace",
-    letterSpacing: 1,
   },
   stepperRow: {
     flexDirection: "row",
