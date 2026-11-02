@@ -5,9 +5,16 @@
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 
 static const char *TAG = "servo";
+
+#define SERVO_MOVE_MS 1000  // 한 위치로 이동을 기다리는 시간. 느린 서보·큰 범위면 늘린다.
+
+// 움직임 하나가 펄스를 끊을 때까지 다음 움직임을 기다리게 한다.
+// 겹치면 먼저 끝난 쪽이 다른 쪽 동작 중에 펄스를 끊는다.
+static SemaphoreHandle_t s_motion_lock;
 
 // ── Duty calculation ──────────────────────────────────────────────────────────
 // 16-bit resolution at 50 Hz: period = 20 000 µs, ticks = 65 536
@@ -22,6 +29,8 @@ static uint32_t level_to_duty(float level)
 
 void servo_init(void)
 {
+    s_motion_lock = xSemaphoreCreateMutex();
+
     ledc_timer_config_t timer = {
         .speed_mode      = LEDC_LOW_SPEED_MODE,
         .timer_num       = SERVO_LEDC_TIMER,
@@ -50,23 +59,39 @@ void servo_write(float level)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
 }
 
-// ── Activate task (runs servo_activate without blocking caller) ───────────────
-static void activate_task(void *arg)
+// 펄스를 끊어 위치 유지를 멈춘다. 대기 중 떨림·발열·전원 부담이 사라지는 대신 유지 토크도 없다.
+static void servo_release(void)
 {
-    ESP_LOGI(TAG, "Servo activation started");
-    float low  = servo_get_low();
-    float high = servo_get_high();
-    servo_write(low);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    servo_write(high);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    ESP_LOGI(TAG, "Servo activation completed");
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, 0);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
+}
+
+// ── Motion task (runs without blocking caller) ────────────────────────────────
+// arg != NULL: low → high (문 열기), NULL: high만 (부팅 시 대기 위치로)
+static void motion_task(void *arg)
+{
+    xSemaphoreTake(s_motion_lock, portMAX_DELAY);
+    if (arg) {
+        ESP_LOGI(TAG, "Servo activation started");
+        servo_write(servo_get_low());
+        vTaskDelay(pdMS_TO_TICKS(SERVO_MOVE_MS));
+    }
+    servo_write(servo_get_high());
+    vTaskDelay(pdMS_TO_TICKS(SERVO_MOVE_MS));
+    servo_release();
+    ESP_LOGI(TAG, "Servo motion completed");
+    xSemaphoreGive(s_motion_lock);
     vTaskDelete(NULL);
 }
 
 void servo_activate(void)
 {
-    xTaskCreate(activate_task, "servo_act", 2048, NULL, 5, NULL);
+    xTaskCreate(motion_task, "servo_act", 2048, (void *)1, 5, NULL);
+}
+
+void servo_rest(void)
+{
+    xTaskCreate(motion_task, "servo_rest", 2048, NULL, 5, NULL);
 }
 
 // ── NVS persistence ───────────────────────────────────────────────────────────

@@ -56,7 +56,7 @@ void app_main(void)
     device_config_load();
     led_indicator_init();
     servo_init();
-    servo_write(servo_get_high());
+    servo_rest();
 
     transport_init();
 
