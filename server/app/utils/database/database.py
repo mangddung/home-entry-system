@@ -1,5 +1,7 @@
+import time
 from pathlib import Path
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 Base = declarative_base()
@@ -9,6 +11,8 @@ Session = None
 
 _DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 _DB_PATH  = _DATA_DIR / "app.db"
+
+SCHEMA_ATTEMPTS = 5
 
 def init_db():
     global engine, Session
@@ -20,6 +24,21 @@ def init_db():
     import importlib
     importlib.import_module("app.utils.database.models")
 
+    # 서버와 MQTT 워커가 동시에 시작하면 같은 테이블·컬럼을 함께 만들다 부딪힌다.
+    # 각 단계가 존재 여부를 먼저 보므로 다시 돌리면 남은 것만 이어서 끝낸다.
+    for attempt in range(SCHEMA_ATTEMPTS):
+        try:
+            _apply_schema()
+            break
+        except OperationalError:
+            if attempt == SCHEMA_ATTEMPTS - 1:
+                raise
+            time.sleep(0.5)
+
+    Session = sessionmaker(bind=engine)
+
+
+def _apply_schema():
     inspector = inspect(engine)
     existing  = set(inspector.get_table_names())
     missing   = {t for t in Base.metadata.tables if t not in existing}
@@ -90,5 +109,3 @@ def init_db():
             with engine.connect() as conn:
                 conn.execute(text(ddl))
                 conn.commit()
-
-    Session = sessionmaker(bind=engine)
