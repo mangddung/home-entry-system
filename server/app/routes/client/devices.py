@@ -1,10 +1,14 @@
+import hashlib
+import hmac
 import json
+import re
 import secrets
 from datetime import datetime, timezone, timedelta
 import os
 
 from flask import Blueprint, request, jsonify
 
+from app.utils.crypto_utils import decrpyt_key
 from app.utils.fcm_utils import send_to_device_master, send_to_device_role, send_to_user
 from app.utils.log_utils import log_activity
 from firebase_admin import messaging
@@ -319,6 +323,50 @@ def update_rssi_threshold():
     send_to_device_role(device_uuid, ["master", "member"], f"{nickname} 기기 알림",
                         "근접 해제 기준이 변경되었습니다", data={"type": "refresh_devices"})
     return jsonify({"status": "success", "message": "success"}), 200
+
+# POST /client/device-servo-command
+# 서보 범위 변경 명령에 서명한다. master만. 앱이 BLE로 기기에 전달하면 기기가 서명을 확인하고 저장한다.
+# 저장값의 기준은 기기 NVS라 서버는 보관하지 않는다 (esp32/main/ble_server.c와 짝).
+SERVO_DEG_MIN, SERVO_DEG_MAX = 0, 180
+SERVO_MIN_SWING_DEG = 10
+
+def _valid_servo_deg(value) -> bool:
+    # bool은 int의 하위 타입이라 따로 거른다
+    return isinstance(value, int) and not isinstance(value, bool) and SERVO_DEG_MIN <= value <= SERVO_DEG_MAX
+
+@client_bp.route("/device-servo-command", methods=["POST"])
+def sign_servo_command():
+    payload, err = verify_access_token(request.headers.get("Authorization", ""))
+    if err:
+        return jsonify({"status": "error", "message": "invalid token"}), 401
+
+    user_uuid = payload["sub"]
+
+    data = request.get_json(silent=True) or {}
+    device_uuid = (data.get("device_uuid") or "").strip()
+    nonce = data.get("nonce")
+    low_deg = data.get("low_deg")
+    high_deg = data.get("high_deg")
+    if (not device_uuid or not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{16}", nonce)
+        or not _valid_servo_deg(low_deg) or not _valid_servo_deg(high_deg)
+        or abs(low_deg - high_deg) < SERVO_MIN_SWING_DEG):
+        return jsonify({"status": "error", "message": "invalid payload"}), 400
+
+    with _db.Session() as session:
+        master = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid, device_uuid=device_uuid, role="master").first()
+        if not master:
+            return jsonify({"status": "error", "message": "forbidden"}), 403
+        device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()
+        if not device:
+            return jsonify({"status": "error", "message": "invalid payload"}), 400
+        encrypted_secret = device.device_secret_key
+
+    key = bytes.fromhex(decrpyt_key(os.environ["MASTER_KEK"], encrypted_secret))
+    mac = hmac.new(key, f"servo|{nonce}|{low_deg}|{high_deg}".encode(), hashlib.sha256).hexdigest()
+
+    log_activity("device_servo_range_requested", user_uuid=user_uuid, device_uuid=device_uuid,
+                 detail={"low_deg": low_deg, "high_deg": high_deg})
+    return jsonify({"status": "success", "data": {"command": f"SRV:{low_deg}:{high_deg}:{mac}"}}), 200
 
 # DELETE /client/device
 @client_bp.route("/device", methods=["DELETE"])

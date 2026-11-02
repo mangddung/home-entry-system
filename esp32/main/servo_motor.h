@@ -17,3 +17,7 @@ float servo_get_low(void);
 float servo_get_high(void);
 void  servo_set_low(float level);
 void  servo_set_high(float level);
+
+// 앱 설정 화면용 각도 단위(0~180°). low = 동작 각도, high = 대기 각도
+void servo_get_range_deg(int *low_deg, int *high_deg);
+void servo_set_range_deg(int low_deg, int high_deg);

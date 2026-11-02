@@ -86,6 +86,7 @@ export default function RootLayout() {
           <Stack.Screen name="register_invite_code" options={{ headerShown: false }} />
           <Stack.Screen name="feedback" options={{ headerShown: false }} />
           <Stack.Screen name="device/rssi-calibrate" options={{ headerShown: false }} />
+          <Stack.Screen name="device/servo-range" options={{ headerShown: false }} />
           <Stack.Screen name="ble-debug" options={{ headerShown: false }} />
           <Stack.Screen name="modal" options={{ presentation: "modal", title: "Modal" }} />
         </Stack>

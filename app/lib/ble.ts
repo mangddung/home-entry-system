@@ -532,3 +532,36 @@ export const userTokenExchange = async (ioTDevice: IoTDevice, opts?: ScanOptions
     if (!sent) await connected.cancelConnection().catch(() => {});
   }
 };
+
+const SERVO_SCAN_TIMEOUT_MS = 10000;
+
+// 서보 범위 명령 한 번: 스캔 → 연결 → nonce 수신 → 명령 전송 → 기기 응답 수신 → 연결 해제.
+// buildCommand가 null을 주면 보내지 않는다. 형식은 esp32/main/ble_server.c 참고.
+export const exchangeServoCommand = async (
+  ioTDevice: IoTDevice,
+  buildCommand: (nonce: string) => Promise<string | null>,
+): Promise<string | null> => {
+  const devices = await scanDevice(ioTDevice, undefined, { timeoutMs: SERVO_SCAN_TIMEOUT_MS });
+  if (!devices.length) return null;
+  const connected = await connectDevice(devices[0]);
+  if (!connected) return null;
+  try {
+    const nonce = await receiveData(connected, ioTDevice);
+    if (nonce == null) return null;
+    const command = await buildCommand(nonce);
+    if (!command) return null;
+    // 응답을 놓치지 않도록 전송 전에 구독한다
+    const reply = receiveData(connected, ioTDevice);
+    await connected.writeCharacteristicWithoutResponseForService(
+      ioTDevice.ble_uuids.ble_service_uuid as string,
+      ioTDevice.ble_uuids.ble_write_uuid as string,
+      Buffer.from(command, "utf-8").toString("base64"),
+    );
+    return await reply;
+  } catch (e) {
+    logDebug({ event_name, log_type: "WARNING", message: `서보 명령 실패: ${e}` });
+    return null;
+  } finally {
+    await connected.cancelConnection().catch(() => {});
+  }
+};

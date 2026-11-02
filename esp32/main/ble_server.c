@@ -3,6 +3,7 @@
 #include "device_config.h"
 #include "transport.h"
 #include "led_indicator.h"
+#include "servo_motor.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -163,12 +164,120 @@ static bool is_hex(const char *s, uint16_t len)
     return true;
 }
 
+// ── 서보 범위 명령 ────────────────────────────────────────────────────────────
+// BLE 연결·페어링은 마스터 증명이 아니다. 서버가 마스터를 확인하고 기기 비밀키로 서명한 명령만 적용한다.
+//   "SRV?"                        → "SRV:<동작각>:<대기각>" (조회, 서명 불필요)
+//   "SRV:<동작각>:<대기각>:<mac>" → "SRV_OK" / "SRV_FAIL"
+//   mac = HMAC-SHA256(기기 비밀키, "servo|<nonce>|<동작각>|<대기각>") hex (server/app/routes/client/devices.py와 짝)
+#define SERVO_DEG_MAX 180
+
+typedef struct {
+    int  low_deg;
+    int  high_deg;
+    char mac[65];
+    char nonce[sizeof(s_current_otp)];
+} servo_cmd_t;
+
+static void ble_notify_str(const char *msg)
+{
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(msg, strlen(msg));
+    if (om) ble_gatts_notify_custom(s_conn_handle, s_notify_handle, om);
+}
+
+static bool hex_to_bin(const char *hex, uint8_t *out, size_t out_len)
+{
+    if (strlen(hex) != out_len * 2 || !is_hex(hex, out_len * 2)) return false;
+    for (size_t i = 0; i < out_len; i++) {
+        char byte[3] = {hex[i * 2], hex[i * 2 + 1], 0};
+        out[i] = (uint8_t)strtol(byte, NULL, 16);
+    }
+    return true;
+}
+
+static bool servo_mac_valid(const char *input, const char *mac_hex)
+{
+    uint8_t secret[16], mac[32];
+    if (!hex_to_bin(IOT_DEVICE_SECRET_KEY, secret, sizeof(secret)) ||
+        !hex_to_bin(mac_hex, mac, sizeof(mac))) {
+        return false;
+    }
+    psa_crypto_init();
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attr, PSA_KEY_TYPE_HMAC);
+    psa_set_key_bits(&attr, 128);
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_VERIFY_MESSAGE);
+    psa_set_key_algorithm(&attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+    psa_key_id_t key;
+    if (psa_import_key(&attr, secret, sizeof(secret), &key) != PSA_SUCCESS) return false;
+    bool ok = psa_mac_verify(key, PSA_ALG_HMAC(PSA_ALG_SHA_256),
+                             (const uint8_t *)input, strlen(input), mac, sizeof(mac)) == PSA_SUCCESS;
+    psa_destroy_key(key);
+    return ok;
+}
+
+// PSA 검증과 NVS 쓰기를 NimBLE 호스트 태스크 밖에서 처리한다
+static void servo_cmd_task(void *arg)
+{
+    servo_cmd_t *c = arg;
+    char input[48];
+    snprintf(input, sizeof(input), "servo|%s|%d|%d", c->nonce, c->low_deg, c->high_deg);
+    if (servo_mac_valid(input, c->mac)) {
+        servo_set_range_deg(c->low_deg, c->high_deg);
+        ESP_LOGI(TAG, "Servo range saved: %d / %d", c->low_deg, c->high_deg);
+        ble_notify_str("SRV_OK");
+        servo_activate();  // 새 범위를 바로 눈으로 확인하게 한 번 움직인다
+    } else {
+        ESP_LOGW(TAG, "Servo command rejected");
+        ble_notify_str("SRV_FAIL");
+    }
+    free(c);
+    vTaskDelete(NULL);
+}
+
+static void process_servo_command(const char *msg)
+{
+    if (strcmp(msg, "SRV?") == 0) {
+        int low_deg, high_deg;
+        char reply[32];
+        servo_get_range_deg(&low_deg, &high_deg);
+        snprintf(reply, sizeof(reply), "SRV:%d:%d", low_deg, high_deg);
+        ble_notify_str(reply);
+        return;
+    }
+
+    servo_cmd_t *c = calloc(1, sizeof(*c));
+    if (!c) {
+        ble_notify_str("SRV_FAIL");
+        return;
+    }
+    if (sscanf(msg, "SRV:%d:%d:%64s", &c->low_deg, &c->high_deg, c->mac) != 3 ||
+        c->low_deg < 0 || c->low_deg > SERVO_DEG_MAX ||
+        c->high_deg < 0 || c->high_deg > SERVO_DEG_MAX) {
+        ESP_LOGE(TAG, "Servo command format invalid");
+        free(c);
+        ble_notify_str("SRV_FAIL");
+        return;
+    }
+    // nonce는 명령 하나에만 쓴다. 틀린 mac을 같은 연결에서 반복 시도하지 못하고, 인증 타이머가 연결을 정리한다.
+    strlcpy(c->nonce, s_current_otp, sizeof(c->nonce));
+    s_current_otp[0] = '\0';
+    if (xTaskCreate(servo_cmd_task, "servo_cmd", 4096, c, 5, NULL) != pdPASS) {
+        free(c);
+        ble_notify_str("SRV_FAIL");
+    }
+}
+
 static void process_write_payload(const char *msg, uint16_t len)
 {
     // OTP가 없으면(구독 전·소진·만료) 서버로 보내지 않는다. 인증 없이 쓸 수 있는 특성이라
     // 막지 않으면 쓰기 폭주가 HTTP 태스크와 서버 요청 제한을 소모한다.
     if (s_current_otp[0] == '\0') {
         ESP_LOGW(TAG, "Write without valid OTP – ignored");
+        return;
+    }
+
+    if (strncmp(msg, "SRV", 3) == 0) {
+        process_servo_command(msg);
         return;
     }
 

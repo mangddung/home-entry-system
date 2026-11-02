@@ -282,3 +282,34 @@ export const updateRssiThreshold = async (device_uuid: string, rssi_threshold: n
     return { type: "forbidden", message: getApiErrorMessage(error) };
   }
 };
+
+type SignServoResult =
+  | { type: "success"; command: string }
+  | { type: "forbidden" | "no_response"; message: string };
+
+// POST /client/device-servo-command (master만). 기기에 BLE로 전달할 서명된 명령을 받는다.
+export const signServoCommand = async (
+  device_uuid: string,
+  low_deg: number,
+  high_deg: number,
+  nonce: string,
+): Promise<SignServoResult> => {
+  const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
+  if (!access_token) {
+    return { type: "forbidden", message: "access token이 없습니다." };
+  }
+
+  try {
+    const response = await axios.post(
+      `${BACKEND_URL}/client/device-servo-command`,
+      { device_uuid, low_deg, high_deg, nonce },
+      { headers: { Authorization: `Bearer ${access_token}` }, timeout: 5000 },
+    );
+    return { type: "success", command: response.data.data.command };
+  } catch (error) {
+    if (axios.isAxiosError(error) && !error.response) {
+      return { type: "no_response", message: "서버에 연결할 수 없습니다." };
+    }
+    return { type: "forbidden", message: getApiErrorMessage(error) };
+  }
+};

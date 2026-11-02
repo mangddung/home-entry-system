@@ -118,6 +118,7 @@ function getActionLabel(action: string): string {
     device_reauth: "기기 재인증",
     device_reset: "기기 초기화",
     device_rssi_threshold_updated: "열림 거리 변경",
+    device_servo_range_requested: "서보 범위 변경",
   };
   return map[action] ?? action;
 }

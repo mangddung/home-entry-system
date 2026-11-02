@@ -138,3 +138,16 @@ void servo_set_high(float level)
 {
     nvs_write_float(NVS_NS_SERVO, NVS_KEY_SRV_HIGH, level);
 }
+
+// level -1~1이 펄스 SERVO_MIN_US~MAX_US, 곧 0~180°에 대응한다
+void servo_get_range_deg(int *low_deg, int *high_deg)
+{
+    *low_deg  = (int)((servo_get_low()  + 1.0f) * 90.0f + 0.5f);
+    *high_deg = (int)((servo_get_high() + 1.0f) * 90.0f + 0.5f);
+}
+
+void servo_set_range_deg(int low_deg, int high_deg)
+{
+    servo_set_low(low_deg / 90.0f - 1.0f);
+    servo_set_high(high_deg / 90.0f - 1.0f);
+}
