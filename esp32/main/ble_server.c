@@ -198,6 +198,8 @@ typedef struct {
     int  high_deg;
     char mac[65];
     char nonce[sizeof(s_current_otp)];
+    bool valid;
+    struct ble_npl_event ev;  // 검증 결과를 NimBLE 호스트 태스크로 넘긴다
 } servo_cmd_t;
 
 static void ble_notify_str(const char *msg)
@@ -237,30 +239,20 @@ static bool servo_mac_valid(const char *input, const char *mac_hex)
     return ok;
 }
 
-// PSA 검증과 NVS 쓰기를 NimBLE 호스트 태스크 밖에서 처리한다
-static void servo_cmd_task(void *arg)
+// 검증 결과 반영. NimBLE 호스트 태스크에서 실행되어 GAP 연결·끊김 처리와 겹치지 않는다
+// (다른 태스크에서 연결 확인과 허가를 따로 하면 그 사이 끊김·재연결에 허가가 다음 연결로 넘어간다).
+static void servo_cmd_result(struct ble_npl_event *ev)
 {
-    servo_cmd_t *c = arg;
-    char input[48];
-    if (c->kind == SERVO_CMD_RANGE) {
-        snprintf(input, sizeof(input), "servo|%s|%d|%d", c->nonce, c->low_deg, c->high_deg);
-    } else {
-        snprintf(input, sizeof(input), "%s|%s", c->kind == SERVO_CMD_LIVE ? "ble-live" : "ble-bond", c->nonce);
-    }
-    bool valid = servo_mac_valid(input, c->mac);
-
+    servo_cmd_t *c = ble_npl_event_get_arg(ev);
     if (c->conn_gen != s_conn_gen) {
         // 검증하는 동안 연결이 끊겼다. 허가가 다음 연결로 넘어가지 않게 버린다.
         ESP_LOGW(TAG, "Servo command dropped: connection changed");
-    } else if (!valid) {
+    } else if (!c->valid) {
         ESP_LOGW(TAG, "Servo command rejected");
         ble_notify_str("SRV_FAIL");
         if (s_live_granted) issue_otp(s_conn_handle);
     } else if (c->kind == SERVO_CMD_RANGE) {
-        servo_set_range_deg(c->low_deg, c->high_deg);
-        ESP_LOGI(TAG, "Servo range saved: %d / %d", c->low_deg, c->high_deg);
         ble_notify_str("SRV_OK");
-        servo_activate();  // 새 범위를 바로 눈으로 확인하게 한 번 움직인다. 끝나면 대기 위치다.
         s_live_moved = false;
         if (s_live_granted) issue_otp(s_conn_handle);
     } else if (c->kind == SERVO_CMD_LIVE) {
@@ -277,7 +269,30 @@ static void servo_cmd_task(void *arg)
         s_bond_window = true;
         ble_notify_str("SRVB_OK");
     }
+    ble_npl_event_deinit(ev);  // init이 이벤트 메모리를 따로 잡는다
     free(c);
+}
+
+// PSA 검증과 NVS 쓰기를 NimBLE 호스트 태스크 밖에서 처리하고, 결과 반영은 호스트 태스크로 넘긴다
+static void servo_cmd_task(void *arg)
+{
+    servo_cmd_t *c = arg;
+    char input[48];
+    if (c->kind == SERVO_CMD_RANGE) {
+        snprintf(input, sizeof(input), "servo|%s|%d|%d", c->nonce, c->low_deg, c->high_deg);
+    } else {
+        snprintf(input, sizeof(input), "%s|%s", c->kind == SERVO_CMD_LIVE ? "ble-live" : "ble-bond", c->nonce);
+    }
+    c->valid = servo_mac_valid(input, c->mac);
+
+    // 범위 저장은 서버가 서명한 값이라 연결이 바뀌어도 넘어가는 권한이 없다. 응답만 호스트 태스크가 보낸다.
+    if (c->valid && c->kind == SERVO_CMD_RANGE && c->conn_gen == s_conn_gen) {
+        servo_set_range_deg(c->low_deg, c->high_deg);
+        ESP_LOGI(TAG, "Servo range saved: %d / %d", c->low_deg, c->high_deg);
+        servo_activate();  // 새 범위를 바로 눈으로 확인하게 한 번 움직인다. 끝나면 대기 위치다.
+    }
+    ble_npl_event_init(&c->ev, servo_cmd_result, c);
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &c->ev);
     vTaskDelete(NULL);
 }
 
