@@ -19,7 +19,7 @@ from app.utils.database.models import DeviceLocation, Settings, User
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
 from app.utils.device_utils import SETUP_CLAIM_TTL, hw_fields
-from app.utils.mqtt_utils import open_zigbee_join
+from app.utils.mqtt_utils import notify_zigbee_check_registration, open_zigbee_join
 from app.routes.client.auth import verify_access_token
 
 client_bp = Blueprint("client", __name__, url_prefix="/client")
@@ -394,6 +394,8 @@ def delete_device():
 
         # 삭제 시 매핑이 cascade로 사라지므로 알림 대상은 미리 모은다
         notify_uuids = [m.user_uuid for m in session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid).all()]
+        # 새 행은 게이트웨이 묶음을 풀므로 신호 보낼 곳도 미리 챙긴다
+        zigbee_target = (device.gateway_id, device.ieee_addr) if device.transport == "zigbee" else None
 
         saved = {
             "device_uuid": device.device_uuid,
@@ -417,6 +419,8 @@ def delete_device():
         session.commit()
 
         log_activity("device_deleted", user_uuid=user_uuid, device_uuid=device_uuid)
+        if zigbee_target and all(zigbee_target):
+            notify_zigbee_check_registration(*zigbee_target)
         # 멤버·게스트 앱이 삭제된 기기의 지오펜스·캐시를 내리도록 refresh_devices를 싣는다
         for uid in notify_uuids:
             send_to_user(uid, f"{device_nickname} 기기 알림", "기기가 삭제되었습니다", data={"type": "refresh_devices"})

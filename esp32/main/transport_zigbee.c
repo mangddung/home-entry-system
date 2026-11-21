@@ -9,6 +9,8 @@
 //     응답: HMAC(key, 요청(태그 제외) || rsp_type||seq||rsp_data)  → 응답이 해당 요청에 묶여 재사용·위조 불가
 //   Zigbee 네트워크 키를 가진 다른 노드(같은 게이트웨이에 붙은 전구 등)가 "인증 성공" 응답을 위조해 문을 열지 못하게 한다.
 // ponytail: 요청 재전송(옛 RESET 등) 방지는 서버 중복 제거(짧은 TTL)뿐이다. install code·카운터 단계에서 보완.
+//   예외: ZB_MSG_CHECK_REG는 서버가 먼저 보내는 태그 없는 신호다. 받으면 ping을 앞당길 뿐이고
+//   초기화 여부는 태그가 붙은 ping 응답으로만 정한다(위조·재전송돼도 ping이 한 번 늘 뿐).
 //
 // Sleepy End Device: 수신기는 꺼 두고 ZB_POLL_MS마다 부모에게 쌓인 메시지를 가져온다.
 // 응답을 기다리는 동안만 ZB_FAST_POLL_MS로 당긴다(keepalive 주기 = poll 주기, esp-zigbee-lib 2.x).
@@ -65,6 +67,7 @@ enum {
     ZB_MSG_AUTH_RESULT    = 0x82,  // data: [status]
     ZB_MSG_SETUP_RESULT   = 0x83,  // data: [status] (+ seed(16) when ok)
     ZB_MSG_RESET_RESULT   = 0x84,  // data: [status]
+    ZB_MSG_CHECK_REG      = 0x85,  // 서버 → 기기, 태그 없음: 기기가 삭제됐으니 바로 ping 하라 (data: -)
 };
 #define ZB_STATUS_OK     0
 #define ZB_RSP_FIRST     ZB_MSG_PING_RESULT
@@ -78,6 +81,7 @@ enum {
 // 평소 poll 주기. 게이트웨이(Z-Stack)가 잠든 기기 몫 메시지를 약 7초만 들고 있어 그보다 짧게 둔다.
 #define ZB_POLL_MS          5000
 #define ZB_FAST_POLL_MS     200
+#define ZB_CHECK_REG_MIN_US (30 * 1000 * 1000LL)  // CHECK_REG로 ping을 앞당기는 최소 간격(반복 신호 방어)
 
 typedef struct {
     uint8_t type;
@@ -99,6 +103,8 @@ static volatile bool      s_steer_allowed = false;  // 셋업 모드에선 앱�
 // 새 가입은 게이트웨이가 permit join을 열어야만 되므로 이미 가입했던 기기의 재가입에 쓰면 계속 거절된다.
 static volatile uint8_t   s_retry_mode    = EZB_BDB_MODE_NETWORK_STEERING;
 static int                s_fast_poll_users;   // 응답 대기 중인 요청 수 (Zigbee 락 안에서만 바꾼다)
+static TaskHandle_t       s_ping_task;          // 일반 모드에서만 있다
+static int64_t            s_last_check_reg_us = -ZB_CHECK_REG_MIN_US;
 
 // ── 메시지 인증 ───────────────────────────────────────────────────────────────
 static bool zb_mac(const uint8_t *in, size_t in_len, uint8_t tag[ZB_TAG_LEN])
@@ -222,6 +228,16 @@ static ezb_zcl_status_t app_cluster_cmd_handler(const ezb_zcl_cmd_hdr_t *header,
     }
     zb_msg_t m = {.type = payload[1], .seq = payload[2], .len = payload[0] - 2};
     memcpy(m.data, payload + 3, m.len);
+
+    if (m.type == ZB_MSG_CHECK_REG) {
+        int64_t now = esp_timer_get_time();
+        if (s_ping_task && now - s_last_check_reg_us >= ZB_CHECK_REG_MIN_US) {
+            s_last_check_reg_us = now;
+            ESP_LOGI(TAG, "Server asked for registration check – ping now");
+            xTaskNotifyGive(s_ping_task);
+        }
+        return EZB_ZCL_STATUS_SUCCESS;
+    }
 
     if (m.type < ZB_RSP_FIRST || m.type >= ZB_RSP_FIRST + ZB_RSP_COUNT) {
         ESP_LOGW(TAG, "unknown app message type 0x%02x", m.type);
@@ -493,7 +509,7 @@ static void zb_ping_task(void *arg)
             ESP_LOGW(TAG, "Ping: no server response – retry in 30s");
             if (!init_ok) led_init_fail();
         }
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay_ms));  // CHECK_REG를 받으면 바로 다음 ping
     }
 }
 
@@ -501,7 +517,7 @@ void transport_start(void)
 {
     led_wifi_connecting();  // "네트워크 연결 중" 패턴 공용
     zb_allow_steering();
-    xTaskCreate(zb_ping_task, "zb_ping", 4096, NULL, 4, NULL);
+    xTaskCreate(zb_ping_task, "zb_ping", 4096, NULL, 4, &s_ping_task);
 }
 
 typedef struct {

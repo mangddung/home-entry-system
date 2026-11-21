@@ -34,6 +34,16 @@ def publish_json(topic: str, payload: dict) -> bool:
         return False
 
 
+CHECK_REG = 0x85  # esp32/main/transport_zigbee.c ZB_MSG_CHECK_REG
+
+
+def notify_zigbee_check_registration(gateway_id: str, ieee_addr: str):
+    """삭제된 Zigbee 기기에 '바로 ping 하라'는 신호를 보낸다(태그 없음: 초기화는 기기가 ping 응답을 보고 한다).
+    잠든 기기에 못 닿으면 다음 정기 ping(최대 5분)에서 초기화된다. 요청 스레드를 막지 않게 백그라운드로 발행한다."""
+    payload = {"doorlock_rsp": bytes([CHECK_REG, 0]).hex()}
+    threading.Thread(target=publish_json, args=(f"homes/{gateway_id}/{ieee_addr}/set", payload), daemon=True).start()
+
+
 def open_zigbee_join():
     """Zigbee 기기 셋업 시작: 게이트웨이 네트워크 가입을 잠시 허용한다. 요청 스레드를 막지 않게 백그라운드로 발행한다.
     ponytail: 등록된 게이트웨이 전부를 연다(현 단계 개발 게이트웨이 1대). 앱에 게이트웨이 선택이 들어오면
