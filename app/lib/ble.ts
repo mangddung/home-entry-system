@@ -1,12 +1,13 @@
 import { requestBluetoothPermission } from "@/hooks/request-ble-permit";
-import { updateDeviceStatus } from "@/lib/api/devices";
+import { requestBleGrant, signServoCommand, updateDeviceStatus } from "@/lib/api/devices";
+import { commitBond, dropPendingBond, hasBond, markPendingBond, resetBond, unbondDevice } from "@/lib/bond";
 import { DEBUG_LOG, USER_SECRET_KEY } from "@/lib/constants";
 import { hmacSha256, sha256 } from "@/lib/crypto";
 import { createGate } from "@/lib/proximity-rules";
 import { appendSystemLog, formatTimestamp } from "@/lib/system-log";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Buffer } from "buffer";
-import { BleManager, Device, ScanMode } from "react-native-ble-plx";
+import { BleManager, ConnectionOptions, ConnectionPriority, Device, ScanMode } from "react-native-ble-plx";
 import { getTokenSecure } from "./token-storage";
 import { DebugLog, IoTDevice, Transport } from "./types";
 
@@ -255,6 +256,7 @@ export const connectDevice = async (
   device: Device,
   tryCount: any = 0,
   shouldAbort?: () => boolean,
+  options?: ConnectionOptions,
 ): Promise<Device | null> => {
   let connected: Device | null = null;
   let aborted = false;
@@ -265,7 +267,7 @@ export const connectDevice = async (
       manager.cancelDeviceConnection(device.id).catch(() => {});
     }, 500);
     try {
-      connected = await device.connect();
+      connected = await device.connect(options);
       break;
     } catch (e: any) {
       tryCount++;
@@ -283,6 +285,16 @@ export const connectDevice = async (
 
   try {
     await connected.discoverAllServicesAndCharacteristics();
+    // 셋업·일반 모드는 주소가 같고 특성 표가 다르다. 본딩한 폰은 Android가 표를 캐시해서 등록 직후 첫 연결에 옛 표가 나온다.
+    // 광고한 서비스가 표에 없으면 캐시를 버리고 한 번 다시 연결한다.
+    const advertised = device.serviceUUIDs?.[0]?.toLowerCase();
+    if (advertised && !options?.refreshGatt) {
+      const services = await connected.services();
+      if (!services.some((s) => s.uuid.toLowerCase() === advertised)) {
+        await connected.cancelConnection().catch(() => {});
+        return connectDevice(device, 0, shouldAbort, { ...options, refreshGatt: "OnConnected" });
+      }
+    }
     return connected;
   } catch (e: any) {
     logDebug({ event_name, log_type: "WARNING", message: `서비스 탐색 실패: ${e.message}` });
@@ -534,34 +546,231 @@ export const userTokenExchange = async (ioTDevice: IoTDevice, opts?: ScanOptions
 };
 
 const SERVO_SCAN_TIMEOUT_MS = 10000;
+// 서보 실시간 조절 특성. esp32/main/ble_server.c SERVO_LIVE_CHR_UUID와 짝
+const SERVO_LIVE_CHR_UUID = "a3f1c6e2-5b7d-4e19-8c42-7d9e0b36f1a8";
+const NONCE_PATTERN = /^[0-9a-f]{16}$/;
+const REPLY_TIMEOUT_MS = 8000;
+const BOND_RESULT_TIMEOUT_MS = 30000; // 펌웨어 BOND_WINDOW_MS와 같은 값
+// 펌웨어 특성 표가 바뀌었으므로 본딩한 폰이 캐시한 옛 GATT를 버리고 다시 읽는다
+const SESSION_CONNECT_OPTIONS: ConnectionOptions = { refreshGatt: "OnConnected" };
 
-// 서보 범위 명령 한 번: 스캔 → 연결 → nonce 수신 → 명령 전송 → 기기 응답 수신 → 연결 해제.
-// buildCommand가 null을 주면 보내지 않는다. 형식은 esp32/main/ble_server.c 참고.
-export const exchangeServoCommand = async (
+// 연결을 유지하는 흐름의 알림 수신함. receiveData는 1회용이라 알림이 여러 번 오면 쓸 수 없다.
+// 보낸 순서와 도착 순서가 어긋나도 되도록 형식으로 골라 꺼낸다.
+const openInbox = (connected: Device, ioTDevice: IoTDevice) => {
+  const inbox: string[] = [];
+  const waiters = new Set<{ pattern: RegExp; deliver: (message: string) => void }>();
+
+  const subscription = connected.monitorCharacteristicForService(
+    ioTDevice.ble_uuids.ble_service_uuid,
+    ioTDevice.ble_uuids.ble_read_uuid,
+    (err, char) => {
+      if (err || !char?.value) return;
+      const message = Buffer.from(char.value, "base64").toString("utf-8");
+      const waiter = [...waiters].find((w) => w.pattern.test(message));
+      if (waiter) waiter.deliver(message);
+      else inbox.push(message);
+    },
+  );
+
+  const waitFor = (pattern: RegExp, timeoutMs = REPLY_TIMEOUT_MS) =>
+    new Promise<string | null>((resolve) => {
+      const index = inbox.findIndex((m) => pattern.test(m));
+      if (index >= 0) {
+        resolve(inbox.splice(index, 1)[0]);
+        return;
+      }
+      const waiter = {
+        pattern,
+        deliver: (message: string) => {
+          clearTimeout(timer);
+          waiters.delete(waiter);
+          resolve(message);
+        },
+      };
+      const timer = setTimeout(() => {
+        waiters.delete(waiter);
+        resolve(null);
+      }, timeoutMs);
+      waiters.add(waiter);
+    });
+
+  return { waitFor, close: () => subscription.remove() };
+};
+
+const sendCommand = (connected: Device, ioTDevice: IoTDevice, command: string) =>
+  connected.writeCharacteristicWithoutResponseForService(
+    ioTDevice.ble_uuids.ble_service_uuid,
+    ioTDevice.ble_uuids.ble_write_uuid,
+    Buffer.from(command, "utf-8").toString("base64"),
+  );
+
+export type ServoSession = {
+  range: { low: number; high: number };
+  move: (deg: number) => void;
+  // 성공하면 null, 실패하면 사유
+  save: (low: number, high: number) => Promise<string | null>;
+  close: () => Promise<void>;
+};
+
+export type ServoSessionResult =
+  | { type: "ready"; session: ServoSession }
+  | { type: "need_bond" | "failed"; message: string };
+
+const NEED_BOND_MESSAGE = "이 휴대폰이 기기에 연결되어 있지 않습니다.";
+const NOT_FOUND_MESSAGE = "기기를 찾지 못했습니다. 기기 전원을 확인하고 문 앞에서 다시 시도하세요.";
+const CONNECT_FAILED_MESSAGE = "기기에 연결하지 못했습니다. 문 앞에서 다시 시도하세요.";
+
+// 서보 실시간 조절 세션을 연다. 스캔 → 연결 → nonce → 본딩으로 암호화(팝업 없음) → 서버 허가 → 현재 범위 조회.
+// 연결을 유지하므로 각도 명령은 서버를 거치지 않고 바로 간다. 형식은 esp32/main/ble_server.c 참고.
+// onClosed: 기기 쪽 사유로 연결이 끊겼을 때만 불린다(close()는 부르지 않는다).
+export const openServoSession = async (
   ioTDevice: IoTDevice,
-  buildCommand: (nonce: string) => Promise<string | null>,
-): Promise<string | null> => {
-  const devices = await scanDevice(ioTDevice, undefined, { timeoutMs: SERVO_SCAN_TIMEOUT_MS });
-  if (!devices.length) return null;
-  const connected = await connectDevice(devices[0]);
-  if (!connected) return null;
+  onClosed: () => void,
+): Promise<ServoSessionResult> => {
+  if (!(await hasBond(ioTDevice.device_uuid))) return { type: "need_bond", message: NEED_BOND_MESSAGE };
+
+  const [found] = await scanDevice(ioTDevice, undefined, { timeoutMs: SERVO_SCAN_TIMEOUT_MS });
+  if (!found) return { type: "failed", message: NOT_FOUND_MESSAGE };
+  // 본딩 없는 주소에 암호화를 요청하면 페어링 창이 뜨고 멈춘다. 쓸 수 없는 본딩은 지워 설정 화면 표시도 맞춘다.
+  if (!(await hasBond(ioTDevice.device_uuid, found.id))) {
+    await unbondDevice(ioTDevice.device_uuid);
+    return { type: "need_bond", message: NEED_BOND_MESSAGE };
+  }
+  const connected = await connectDevice(found, 0, undefined, SESSION_CONNECT_OPTIONS);
+  if (!connected) return { type: "failed", message: CONNECT_FAILED_MESSAGE };
+
+  const inbox = openInbox(connected, ioTDevice);
+  let session: ServoSession | null = null;
   try {
-    const nonce = await receiveData(connected, ioTDevice);
-    if (nonce == null) return null;
-    const command = await buildCommand(nonce);
-    if (!command) return null;
-    // 응답을 놓치지 않도록 전송 전에 구독한다
-    const reply = receiveData(connected, ioTDevice);
-    await connected.writeCharacteristicWithoutResponseForService(
-      ioTDevice.ble_uuids.ble_service_uuid as string,
-      ioTDevice.ble_uuids.ble_write_uuid as string,
-      Buffer.from(command, "utf-8").toString("base64"),
-    );
-    return await reply;
+    let nonce = await inbox.waitFor(NONCE_PATTERN, NONCE_TIMEOUT_MS);
+    if (!nonce) return { type: "failed", message: CONNECT_FAILED_MESSAGE };
+
+    // 읽기 응답이 오면 저장된 본딩으로 암호화가 끝난 것이다. 실패하면 기기 쪽에 키가 없는 경우로 보고 본딩을 지운다.
+    // 일시적인 끊김이어도 재연결 한 번으로 복구되고, 문 열기는 본딩 없이도 동작한다.
+    try {
+      await connected.readCharacteristicForService(ioTDevice.ble_uuids.ble_service_uuid, SERVO_LIVE_CHR_UUID);
+    } catch (e) {
+      logDebug({ event_name, log_type: "WARNING", message: `서보 세션 암호화 실패: ${e}` });
+      await unbondDevice(ioTDevice.device_uuid);
+      return { type: "need_bond", message: NEED_BOND_MESSAGE };
+    }
+
+    const grant = await requestBleGrant(ioTDevice.device_uuid, "live", nonce);
+    if (grant.type !== "success") return { type: "failed", message: grant.message };
+    await sendCommand(connected, ioTDevice, grant.command);
+    if ((await inbox.waitFor(/^(SRVS_OK|SRV_FAIL)$/)) !== "SRVS_OK") {
+      return { type: "failed", message: "기기가 허가를 거부했습니다. 다시 시도하세요." };
+    }
+
+    nonce = await inbox.waitFor(NONCE_PATTERN);
+    await sendCommand(connected, ioTDevice, "SRV?");
+    const rangeReply = (await inbox.waitFor(/^SRV:\d+:\d+$/))?.split(":");
+    if (!nonce || !rangeReply) return { type: "failed", message: CONNECT_FAILED_MESSAGE };
+
+    connected.requestConnectionPriority(ConnectionPriority.High).catch(() => {});
+
+    // 쓰기 하나가 끝날 때마다 최신 각도만 보낸다. 타이머가 없어 BLE가 받아주는 만큼 바로 따라간다.
+    let pendingDeg: number | null = null;
+    let sending = false;
+    const flushMove = async () => {
+      if (sending) return;
+      sending = true;
+      while (pendingDeg != null) {
+        const deg = pendingDeg;
+        pendingDeg = null;
+        await connected
+          .writeCharacteristicWithoutResponseForService(
+            ioTDevice.ble_uuids.ble_service_uuid,
+            SERVO_LIVE_CHR_UUID,
+            Buffer.from([deg]).toString("base64"),
+          )
+          .catch(() => {});
+      }
+      sending = false;
+    };
+
+    const disconnected = connected.onDisconnected(() => {
+      inbox.close();
+      disconnected.remove();
+      onClosed();
+    });
+
+    session = {
+      range: { low: Number(rangeReply[1]), high: Number(rangeReply[2]) },
+      move: (deg) => {
+        pendingDeg = deg;
+        void flushMove();
+      },
+      save: async (low, high) => {
+        if (!nonce) return CONNECT_FAILED_MESSAGE;
+        const signed = await signServoCommand(ioTDevice.device_uuid, low, high, nonce);
+        if (signed.type !== "success") return signed.message;
+        try {
+          await sendCommand(connected, ioTDevice, signed.command);
+        } catch {
+          return CONNECT_FAILED_MESSAGE;
+        }
+        const reply = await inbox.waitFor(/^SRV_(OK|FAIL)$/);
+        nonce = await inbox.waitFor(NONCE_PATTERN); // 다음 저장에 쓸 nonce를 기기가 새로 발급한다
+        return reply === "SRV_OK" ? null : "기기가 명령을 거부했습니다. 다시 시도하세요.";
+      },
+      close: async () => {
+        disconnected.remove();
+        inbox.close();
+        await connected.cancelConnection().catch(() => {});
+      },
+    };
+    return { type: "ready", session };
   } catch (e) {
-    logDebug({ event_name, log_type: "WARNING", message: `서보 명령 실패: ${e}` });
-    return null;
+    logDebug({ event_name, log_type: "WARNING", message: `서보 세션 실패: ${e}` });
+    return { type: "failed", message: CONNECT_FAILED_MESSAGE };
   } finally {
+    if (!session) {
+      inbox.close();
+      await connected.cancelConnection().catch(() => {});
+    }
+  }
+};
+
+// 이 휴대폰으로 다시 본딩한다(휴대폰 교체·본딩 유실). 서버가 master를 확인해 기기가 이 연결에서만 페어링을 받는다.
+// 셋업과 같은 순서: 옛 본딩 제거 → 연결 → 페어링 시작은 앱이 → 결과에 따라 본딩 기록 또는 제거.
+export const rebondDevice = async (ioTDevice: IoTDevice): Promise<string | null> => {
+  const [found] = await scanDevice(ioTDevice, undefined, { timeoutMs: SERVO_SCAN_TIMEOUT_MS });
+  if (!found) return NOT_FOUND_MESSAGE;
+
+  await resetBond(found.id);
+  const connected = await connectDevice(found, 0, undefined, SESSION_CONNECT_OPTIONS);
+  if (!connected) return CONNECT_FAILED_MESSAGE;
+
+  const inbox = openInbox(connected, ioTDevice);
+  try {
+    const nonce = await inbox.waitFor(NONCE_PATTERN, NONCE_TIMEOUT_MS);
+    if (!nonce) return CONNECT_FAILED_MESSAGE;
+
+    const grant = await requestBleGrant(ioTDevice.device_uuid, "bond", nonce);
+    if (grant.type !== "success") return grant.message;
+    await sendCommand(connected, ioTDevice, grant.command);
+    if ((await inbox.waitFor(/^(SRVB_OK|SRV_FAIL)$/)) !== "SRVB_OK") {
+      return "기기가 허가를 거부했습니다. 다시 시도하세요.";
+    }
+
+    await markPendingBond(found.id);
+    await triggerPairing(connected, {
+      ...ioTDevice,
+      ble_uuids: { ...ioTDevice.ble_uuids, ble_read_uuid: SERVO_LIVE_CHR_UUID },
+    });
+    if ((await inbox.waitFor(/^BOND_(OK|FAIL)$/, BOND_RESULT_TIMEOUT_MS)) !== "BOND_OK") {
+      await dropPendingBond();
+      return "페어링을 완료하지 못했습니다. 다시 시도하세요.";
+    }
+    await commitBond(ioTDevice.device_uuid);
+    return null;
+  } catch (e) {
+    logDebug({ event_name, log_type: "WARNING", message: `재본딩 실패: ${e}` });
+    await dropPendingBond();
+    return CONNECT_FAILED_MESSAGE;
+  } finally {
+    inbox.close();
     await connected.cancelConnection().catch(() => {});
   }
 };

@@ -7,14 +7,19 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "servo";
 
 #define SERVO_MOVE_MS 1000  // 한 위치로 이동을 기다리는 시간. 느린 서보·큰 범위면 늘린다.
+#define SERVO_PREVIEW_HOLD_MS 1500  // 실시간 조절 입력이 멈춘 뒤 펄스를 끊기까지 시간
 
 // 움직임 하나가 펄스를 끊을 때까지 다음 움직임을 기다리게 한다.
 // 겹치면 먼저 끝난 쪽이 다른 쪽 동작 중에 펄스를 끊는다.
 static SemaphoreHandle_t s_motion_lock;
+static esp_timer_handle_t s_preview_timer;
+
+static void preview_release_cb(void *arg);
 
 // ── Duty calculation ──────────────────────────────────────────────────────────
 // 16-bit resolution at 50 Hz: period = 20 000 µs, ticks = 65 536
@@ -30,6 +35,12 @@ static uint32_t level_to_duty(float level)
 void servo_init(void)
 {
     s_motion_lock = xSemaphoreCreateMutex();
+
+    const esp_timer_create_args_t preview_args = {
+        .callback = preview_release_cb,
+        .name     = "servo_preview",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&preview_args, &s_preview_timer));
 
     ledc_timer_config_t timer = {
         .speed_mode      = LEDC_LOW_SPEED_MODE,
@@ -92,6 +103,25 @@ void servo_activate(void)
 void servo_rest(void)
 {
     xTaskCreate(motion_task, "servo_rest", 2048, NULL, 5, NULL);
+}
+
+// ── Live preview ──────────────────────────────────────────────────────────────
+static void preview_release_cb(void *arg)
+{
+    // 동작 중이면 motion_task가 끝날 때 펄스를 끊는다
+    if (xSemaphoreTake(s_motion_lock, 0) != pdTRUE) return;
+    servo_release();
+    xSemaphoreGive(s_motion_lock);
+}
+
+void servo_preview_deg(int deg)
+{
+    // 다음 드래그 값이 곧 따라오므로 기다리지 않고 버린다
+    if (xSemaphoreTake(s_motion_lock, 0) != pdTRUE) return;
+    servo_write(deg / 90.0f - 1.0f);
+    xSemaphoreGive(s_motion_lock);
+    esp_timer_stop(s_preview_timer);
+    esp_timer_start_once(s_preview_timer, (uint64_t)SERVO_PREVIEW_HOLD_MS * 1000);
 }
 
 // ── NVS persistence ───────────────────────────────────────────────────────────

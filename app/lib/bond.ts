@@ -67,6 +67,16 @@ export const dropPendingBond = async () => {
   await remove(mac);
 };
 
+/** 이 휴대폰에 기기 본딩이 있는지. 폰 기록만 보므로 기기 쪽 상태는 연결해 봐야 안다.
+ *  address: 스캔으로 확인한 기기의 현재 주소. 주소가 다르면 그 본딩은 쓸 수 없다. */
+export const hasBond = async (device_uuid: string, address?: string) => {
+  if (!supported) return false;
+  const mac = (await readMap())[device_uuid];
+  if (!mac || (address && address !== mac)) return false;
+  const bonded = await BleBond!.bondedDevices().catch(() => []);
+  return bonded.some((b) => b.address === mac);
+};
+
 /** 기기 삭제 시 본딩도 제거 */
 export const unbondDevice = async (device_uuid: string) => {
   if (!supported) return;

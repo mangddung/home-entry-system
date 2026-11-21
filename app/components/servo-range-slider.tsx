@@ -28,12 +28,14 @@ type Props = {
   range: ServoRange;
   disabled: boolean;
   onChange: (range: ServoRange) => void;
+  // 손잡이를 잡거나 움직일 때 그 각도로 불린다. 서보를 바로 따라오게 하는 데 쓴다.
+  onDrag: (deg: number) => void;
   colors: { text: string; icon: string };
   trackColor: string;
   tickColor: string;
 };
 
-export function ServoRangeSlider({ range, disabled, onChange, colors, trackColor, tickColor }: Props) {
+export function ServoRangeSlider({ range, disabled, onChange, onDrag, colors, trackColor, tickColor }: Props) {
   const [trackHeight, setTrackHeight] = useState(0);
   const [active, setActive] = useState<Handle | null>(null);
 
@@ -41,8 +43,8 @@ export function ServoRangeSlider({ range, disabled, onChange, colors, trackColor
   const yOf = (deg: number) => TRACK_PAD + (1 - deg / DEG_MAX) * usable;
 
   // PanResponder는 처음 한 번만 만들어지므로 최신 값은 ref로 읽는다
-  const latest = useRef({ range, disabled, onChange, usable, yOf });
-  latest.current = { range, disabled, onChange, usable, yOf };
+  const latest = useRef({ range, disabled, onChange, onDrag, usable, yOf });
+  latest.current = { range, disabled, onChange, onDrag, usable, yOf };
   const drag = useRef<{ handle: Handle; startDeg: number } | null>(null);
 
   const endDrag = () => {
@@ -61,13 +63,17 @@ export function ServoRangeSlider({ range, disabled, onChange, colors, trackColor
         const handle: Handle = Math.abs(touchY - y(r.low)) <= Math.abs(touchY - y(r.high)) ? "low" : "high";
         drag.current = { handle, startDeg: r[handle] };
         setActive(handle);
+        latest.current.onDrag(r[handle]);
       },
       onPanResponderMove: (_, gesture) => {
         if (!drag.current) return;
         const { handle, startDeg } = drag.current;
-        const { range: r, usable: u, onChange: change } = latest.current;
+        const { range: r, usable: u, onChange: change, onDrag: dragTo } = latest.current;
         const deg = clampHandle(r, handle, Math.round(startDeg - (gesture.dy / u) * DEG_MAX));
-        if (deg !== r[handle]) change({ ...r, [handle]: deg });
+        if (deg !== r[handle]) {
+          change({ ...r, [handle]: deg });
+          dragTo(deg);
+        }
       },
       onPanResponderRelease: endDrag,
       onPanResponderTerminate: endDrag,
@@ -92,7 +98,9 @@ export function ServoRangeSlider({ range, disabled, onChange, colors, trackColor
         onAccessibilityAction={(e) => {
           if (disabled) return;
           const step = e.nativeEvent.actionName === "increment" ? 1 : -1;
-          onChange({ ...range, [handle]: clampHandle(range, handle, value + step) });
+          const deg = clampHandle(range, handle, value + step);
+          onChange({ ...range, [handle]: deg });
+          onDrag(deg);
         }}
       >
         <View style={[styles.labelText, side === "left" ? styles.alignEnd : styles.alignStart]}>

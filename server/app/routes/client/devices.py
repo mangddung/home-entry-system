@@ -336,6 +336,24 @@ def _valid_servo_deg(value) -> bool:
     # bool은 int의 하위 타입이라 따로 거른다
     return isinstance(value, int) and not isinstance(value, bool) and SERVO_DEG_MIN <= value <= SERVO_DEG_MAX
 
+def _valid_ble_nonce(nonce) -> bool:
+    return isinstance(nonce, str) and re.fullmatch(r"[0-9a-f]{16}", nonce) is not None
+
+def _sign_as_master(user_uuid: str, device_uuid: str, message: str):
+    """master만 기기 비밀키로 message에 서명받는다. 반환: (mac, 기기 별명, None) 또는 (None, None, 오류 응답)."""
+    with _db.Session() as session:
+        master = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid, device_uuid=device_uuid, role="master").first()
+        if not master:
+            return None, None, (jsonify({"status": "error", "message": "forbidden"}), 403)
+        device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()
+        if not device:
+            return None, None, (jsonify({"status": "error", "message": "invalid payload"}), 400)
+        encrypted_secret = device.device_secret_key
+        nickname = master.device_nickname or device_uuid[:8]
+
+    key = bytes.fromhex(decrpyt_key(os.environ["MASTER_KEK"], encrypted_secret))
+    return hmac.new(key, message.encode(), hashlib.sha256).hexdigest(), nickname, None
+
 @client_bp.route("/device-servo-command", methods=["POST"])
 def sign_servo_command():
     payload, err = verify_access_token(request.headers.get("Authorization", ""))
@@ -349,26 +367,54 @@ def sign_servo_command():
     nonce = data.get("nonce")
     low_deg = data.get("low_deg")
     high_deg = data.get("high_deg")
-    if (not device_uuid or not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{16}", nonce)
+    if (not device_uuid or not _valid_ble_nonce(nonce)
         or not _valid_servo_deg(low_deg) or not _valid_servo_deg(high_deg)
         or abs(low_deg - high_deg) < SERVO_MIN_SWING_DEG):
         return jsonify({"status": "error", "message": "invalid payload"}), 400
 
-    with _db.Session() as session:
-        master = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid, device_uuid=device_uuid, role="master").first()
-        if not master:
-            return jsonify({"status": "error", "message": "forbidden"}), 403
-        device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()
-        if not device:
-            return jsonify({"status": "error", "message": "invalid payload"}), 400
-        encrypted_secret = device.device_secret_key
-
-    key = bytes.fromhex(decrpyt_key(os.environ["MASTER_KEK"], encrypted_secret))
-    mac = hmac.new(key, f"servo|{nonce}|{low_deg}|{high_deg}".encode(), hashlib.sha256).hexdigest()
+    mac, _, error = _sign_as_master(user_uuid, device_uuid, f"servo|{nonce}|{low_deg}|{high_deg}")
+    if error:
+        return error
 
     log_activity("device_servo_range_requested", user_uuid=user_uuid, device_uuid=device_uuid,
                  detail={"low_deg": low_deg, "high_deg": high_deg})
     return jsonify({"status": "success", "data": {"command": f"SRV:{low_deg}:{high_deg}:{mac}"}}), 200
+
+# POST /client/device-ble-grant
+# master 권한을 BLE 연결 하나에 넘겨준다. 앱이 서명을 기기에 전달하면 기기가 확인한다 (esp32/main/ble_server.c와 짝).
+#   live: 서보 실시간 조절 / bond: 이 휴대폰으로 재본딩(마스터에게 알림)
+# 본딩만으로는 권한을 주지 않는다. 계정을 되찾은 뒤에도 공격자 폰의 본딩이 문을 움직이지 못하게 연결마다 서버가 확인한다.
+BLE_GRANTS = {
+    "live": {"prefix": "SRVS", "domain": "ble-live", "action": "device_ble_live_started"},
+    "bond": {"prefix": "SRVB", "domain": "ble-bond", "action": "device_ble_rebond_requested"},
+}
+
+@client_bp.route("/device-ble-grant", methods=["POST"])
+def sign_ble_grant():
+    payload, err = verify_access_token(request.headers.get("Authorization", ""))
+    if err:
+        return jsonify({"status": "error", "message": "invalid token"}), 401
+
+    user_uuid = payload["sub"]
+
+    data = request.get_json(silent=True) or {}
+    device_uuid = (data.get("device_uuid") or "").strip()
+    nonce = data.get("nonce")
+    purpose = data.get("purpose")
+    if not device_uuid or not _valid_ble_nonce(nonce) or not isinstance(purpose, str) or purpose not in BLE_GRANTS:
+        return jsonify({"status": "error", "message": "invalid payload"}), 400
+
+    grant = BLE_GRANTS[purpose]
+    mac, nickname, error = _sign_as_master(user_uuid, device_uuid, f"{grant['domain']}|{nonce}")
+    if error:
+        return error
+
+    log_activity(grant["action"], user_uuid=user_uuid, device_uuid=device_uuid)
+    if purpose == "bond":
+        # 수동 인증처럼 탈취된 계정의 행동이 조용히 지나가지 않게 마스터에게 알린다
+        send_to_device_role(device_uuid, "master", f"{nickname} 기기 알림",
+                            "휴대폰 재연결이 요청되었습니다. 본인이 아니면 계정을 확인하세요")
+    return jsonify({"status": "success", "data": {"command": f"{grant['prefix']}:{mac}"}}), 200
 
 # DELETE /client/device
 @client_bp.route("/device", methods=["DELETE"])

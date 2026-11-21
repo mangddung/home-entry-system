@@ -5,7 +5,8 @@ import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { deleteDevice, deleteMemberShip, fetchDevices, loadDevices, updateDeviceName } from "@/lib/api/devices";
 import { fetchGuestTokens } from "@/lib/api/members";
-import { unbondDevice } from "@/lib/bond";
+import { rebondDevice } from "@/lib/ble";
+import { hasBond, unbondDevice } from "@/lib/bond";
 import { USER_UUID_KEY } from "@/lib/constants";
 import { getTokenSecure } from "@/lib/token-storage";
 import type { IoTDevice } from "@/lib/types";
@@ -66,6 +67,9 @@ export default function DeviceSettingScreen() {
   const [leaveCountdown, setLeaveCountdown] = useState(0);
   const [busy, setBusy] = useState(false);
   const [alertConfig, setAlertConfig] = useState<{ title: string; message: string } | null>(null);
+  const [bonded, setBonded] = useState<boolean | null>(null); // null = 확인 중
+  const [isRebondOpen, setIsRebondOpen] = useState(false);
+  const [isRebonding, setIsRebonding] = useState(false);
 
   // 보정 화면에서 돌아오면 바뀐 기준값을 다시 보여준다
   useFocusEffect(
@@ -73,6 +77,7 @@ export default function DeviceSettingScreen() {
       void (async () => {
         const found = (await loadDevices()).find((d) => d.device_uuid === device_uuid) ?? null;
         setDevice(found);
+        if (found?.role === "master") setBonded(await hasBond(found.device_uuid));
         if (!found || found.role === "master") return;
         const uuid = await getTokenSecure(USER_UUID_KEY);
         if (!uuid) return;
@@ -125,6 +130,19 @@ export default function DeviceSettingScreen() {
       setAlertConfig({ title: "오류", message: result.message ?? "오류가 발생했습니다." });
     }
     setBusy(false);
+  };
+
+  const rebond = async () => {
+    if (!device) return;
+    setIsRebonding(true);
+    const failure = await rebondDevice(device);
+    setBonded(await hasBond(device.device_uuid));
+    setIsRebonding(false);
+    setAlertConfig(
+      failure
+        ? { title: "연결 실패", message: failure }
+        : { title: "연결됨", message: "이 휴대폰으로 서보를 실시간 조절할 수 있습니다." },
+    );
   };
 
   const remove = async () => {
@@ -191,6 +209,25 @@ export default function DeviceSettingScreen() {
               sub="동작 각도와 대기 각도를 조정합니다"
               colors={rowColors}
               onPress={() => router.push({ pathname: "/device/servo-range", params })}
+            />
+          )}
+          {isMaster && (
+            <SettingRow
+              icon="cellphone-link"
+              iconColor="#3B82F6"
+              title="휴대폰 연결"
+              sub={
+                isRebonding
+                  ? "연결하는 중입니다"
+                  : bonded == null
+                    ? "확인하는 중입니다"
+                    : bonded
+                      ? "이 휴대폰과 연결되어 있습니다"
+                      : "다시 연결이 필요합니다 (서보 실시간 조절용)"
+              }
+              colors={rowColors}
+              // 연결이 필요할 때만 누를 수 있다. 재연결하면 지금 본딩을 지우고 팝업을 다시 띄우기 때문이다.
+              onPress={bonded === false && !isRebonding ? () => setIsRebondOpen(true) : undefined}
             />
           )}
 
@@ -299,6 +336,17 @@ export default function DeviceSettingScreen() {
         message={alertConfig?.message}
         onRequestClose={() => setAlertConfig(null)}
       />
+
+      <CustomAlert
+        visible={isRebondOpen}
+        title="이 휴대폰을 기기에 연결할까요?"
+        message="기기 앞에서 진행하세요. Android 페어링 확인 창이 한 번 뜨고, 마스터에게 알림이 갑니다."
+        buttons={[
+          { text: "취소", style: "cancel" },
+          { text: "연결", onPress: rebond },
+        ]}
+        onRequestClose={() => setIsRebondOpen(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -316,12 +364,13 @@ function SettingRow({
   title: string;
   sub: string;
   colors: { text: string; sub: string; bg: string; border: string };
-  onPress: () => void;
+  onPress?: () => void; // 없으면 상태만 보여주는 행
 }) {
   return (
     <TouchableOpacity
       style={[styles.row, { backgroundColor: colors.bg, borderColor: colors.border }]}
       onPress={onPress}
+      disabled={!onPress}
     >
       <MaterialCommunityIcons name={icon} size={20} color={iconColor} />
       <View style={{ flex: 1, gap: 2 }}>
@@ -330,7 +379,7 @@ function SettingRow({
           {sub}
         </Text>
       </View>
-      <MaterialCommunityIcons name="chevron-right" size={18} color={colors.sub} />
+      {onPress && <MaterialCommunityIcons name="chevron-right" size={18} color={colors.sub} />}
     </TouchableOpacity>
   );
 }

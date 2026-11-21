@@ -121,6 +121,8 @@ function getActionLabel(action: string): string {
     device_reset: "기기 초기화",
     device_rssi_threshold_updated: "열림 거리 변경",
     device_servo_range_requested: "서보 범위 변경",
+    device_ble_live_started: "서보 실시간 조절",
+    device_ble_rebond_requested: "휴대폰 재연결",
   };
   return map[action] ?? action;
 }

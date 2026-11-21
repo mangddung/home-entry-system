@@ -12,6 +12,10 @@ void servo_activate(void);
 // 대기 위치로 이동: high → 1 s → 펄스 끊기 (부팅 시)
 void servo_rest(void);
 
+// 실시간 조절: 0~180°로 바로 움직인다. NVS에 쓰지 않고, 입력이 멈추면 펄스를 끊는다.
+// 다른 동작 중이면 버린다. NimBLE 호스트 태스크에서 호출해도 막히지 않는다.
+void servo_preview_deg(int deg);
+
 // NVS-backed angle setpoints
 float servo_get_low(void);
 float servo_get_high(void);

@@ -313,3 +313,30 @@ export const signServoCommand = async (
     return { type: "forbidden", message: getApiErrorMessage(error) };
   }
 };
+
+// POST /client/device-ble-grant (master만). 이 BLE 연결에 줄 권한의 서명을 받는다.
+// live: 서보 실시간 조절 / bond: 이 휴대폰으로 재본딩
+export const requestBleGrant = async (
+  device_uuid: string,
+  purpose: "live" | "bond",
+  nonce: string,
+): Promise<SignServoResult> => {
+  const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
+  if (!access_token) {
+    return { type: "forbidden", message: "access token이 없습니다." };
+  }
+
+  try {
+    const response = await axios.post(
+      `${BACKEND_URL}/client/device-ble-grant`,
+      { device_uuid, purpose, nonce },
+      { headers: { Authorization: `Bearer ${access_token}` }, timeout: 5000 },
+    );
+    return { type: "success", command: response.data.data.command };
+  } catch (error) {
+    if (axios.isAxiosError(error) && !error.response) {
+      return { type: "no_response", message: "서버에 연결할 수 없습니다." };
+    }
+    return { type: "forbidden", message: getApiErrorMessage(error) };
+  }
+};

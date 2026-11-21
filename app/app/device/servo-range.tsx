@@ -1,21 +1,19 @@
-// 서보 동작 범위 설정 (마스터). 기준값은 기기 NVS라 BLE로 읽고, 저장은 서버가 서명한 명령을 BLE로 전달한다.
+// 서보 동작 범위 설정 (마스터). 기준값은 기기 NVS다.
+// 화면에 있는 동안 BLE 연결을 유지해 손잡이를 움직이는 대로 서보가 따라오고, 저장은 서버가 서명한 명령으로 한다.
 import { CustomAlert } from "@/components/custom-alert";
 import { ServoRangeSlider, type ServoRange } from "@/components/servo-range-slider";
 import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
-import { loadDevices, signServoCommand } from "@/lib/api/devices";
-import { exchangeServoCommand } from "@/lib/ble";
+import { loadDevices } from "@/lib/api/devices";
+import { openServoSession, rebondDevice, type ServoSession } from "@/lib/ble";
 import type { IoTDevice } from "@/lib/types";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-const parseRange = (reply: string | null): ServoRange | null => {
-  const match = reply?.match(/^SRV:(\d+):(\d+)$/);
-  return match ? { low: Number(match[1]), high: Number(match[2]) } : null;
-};
+type Status = "connecting" | "need_bond" | "failed" | "ready";
 
 export default function ServoRangeScreen() {
   const colorScheme = useColorScheme();
@@ -24,45 +22,81 @@ export default function ServoRangeScreen() {
   const { device_uuid } = useLocalSearchParams<{ device_uuid?: string }>();
 
   const [device, setDevice] = useState<IoTDevice | null | undefined>(undefined); // undefined = 로딩 중
+  const [status, setStatus] = useState<Status>("connecting");
+  const [statusMessage, setStatusMessage] = useState("");
   const [range, setRange] = useState<ServoRange | null>(null);
+  const [liveDeg, setLiveDeg] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [alertConfig, setAlertConfig] = useState<{ title: string; message: string } | null>(null);
+  const sessionRef = useRef<ServoSession | null>(null);
+  const leftRef = useRef(false); // 연결 중에 화면을 나가면 세션을 남기지 않는다
 
-  const readRange = useCallback(async (target: IoTDevice) => {
-    setBusy(true);
-    const reply = await exchangeServoCommand(target, async () => "SRV?");
-    setRange(parseRange(reply));
-    setBusy(false);
+  const open = useCallback(async (target: IoTDevice) => {
+    setStatus("connecting");
+    const result = await openServoSession(target, () => {
+      sessionRef.current = null;
+      setStatusMessage("기기와 연결이 끊겼습니다. 2분 동안 조작이 없어도 끊깁니다.");
+      setStatus("failed");
+    });
+    if (result.type !== "ready") {
+      setStatusMessage(result.message);
+      setStatus(result.type);
+      return;
+    }
+    if (leftRef.current) {
+      await result.session.close();
+      return;
+    }
+    sessionRef.current = result.session;
+    setRange(result.session.range);
+    setLiveDeg(null);
+    setStatus("ready");
   }, []);
 
   useEffect(() => {
+    leftRef.current = false;
     void (async () => {
       const found = (await loadDevices()).find((d) => d.device_uuid === device_uuid) ?? null;
       setDevice(found);
-      if (found?.role === "master") await readRange(found);
+      if (found?.role === "master") await open(found);
     })();
-  }, [device_uuid, readRange]);
+    return () => {
+      leftRef.current = true;
+      void sessionRef.current?.close();
+      sessionRef.current = null;
+    };
+  }, [device_uuid, open]);
+
+  const rebond = async () => {
+    if (!device) return;
+    setStatus("connecting");
+    const failure = await rebondDevice(device);
+    if (failure) {
+      setStatusMessage(failure);
+      setStatus("need_bond");
+      return;
+    }
+    await open(device);
+  };
+
+  const moveTo = useCallback((deg: number) => {
+    setLiveDeg(deg);
+    sessionRef.current?.move(deg);
+  }, []);
 
   const save = async () => {
-    if (!device || !range) return;
+    if (!sessionRef.current || !range) return;
     setBusy(true);
-    let failure = "기기에 연결하지 못했습니다. 문 앞에서 다시 시도하세요.";
-    const reply = await exchangeServoCommand(device, async (nonce) => {
-      const res = await signServoCommand(device.device_uuid, range.low, range.high, nonce);
-      if (res.type === "success") return res.command;
-      failure = res.message;
-      return null;
-    });
+    const failure = await sessionRef.current.save(range.low, range.high);
     setBusy(false);
-    if (reply === "SRV_OK") {
-      setAlertConfig({ title: "저장됨", message: "기기가 새 범위로 한 번 움직였습니다." });
-    } else {
-      setAlertConfig({
-        title: "저장 실패",
-        message: reply === "SRV_FAIL" ? "기기가 명령을 거부했습니다. 다시 시도하세요." : failure,
-      });
-    }
+    setAlertConfig(
+      failure
+        ? { title: "저장 실패", message: failure }
+        : { title: "저장됨", message: "기기가 새 범위로 한 번 움직였습니다." },
+    );
   };
+
+  const isConnecting = device === undefined || (device?.role === "master" && status === "connecting");
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={["top", "bottom"]}>
@@ -73,7 +107,7 @@ export default function ServoRangeScreen() {
         <Text style={[styles.titleText, { color: colors.text }]}>서보 동작 범위</Text>
       </View>
 
-      {device === undefined || (busy && !range) ? (
+      {isConnecting ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color={colors.tint} />
           <Text style={[styles.centerTitle, { color: colors.text }]}>기기에 연결하는 중입니다</Text>
@@ -83,12 +117,19 @@ export default function ServoRangeScreen() {
         <View style={styles.body}>
           <Text style={[styles.hint, { color: colors.icon }]}>마스터만 변경할 수 있습니다.</Text>
         </View>
-      ) : !range ? (
+      ) : status === "need_bond" ? (
         <View style={styles.body}>
           <Text style={[styles.hint, { color: colors.icon }]}>
-            기기에서 현재 범위를 읽지 못했습니다. 기기 전원을 확인하고 문 앞에서 다시 시도하세요.
+            {statusMessage} 기기 앞에서 연결하면 Android 페어링 확인 창이 한 번 뜹니다.
           </Text>
-          <TouchableOpacity style={styles.primaryBtn} onPress={() => readRange(device)}>
+          <TouchableOpacity style={styles.primaryBtn} onPress={rebond}>
+            <Text style={styles.primaryText}>이 휴대폰 연결</Text>
+          </TouchableOpacity>
+        </View>
+      ) : status === "failed" || !range ? (
+        <View style={styles.body}>
+          <Text style={[styles.hint, { color: colors.icon }]}>{statusMessage}</Text>
+          <TouchableOpacity style={styles.primaryBtn} onPress={() => open(device)}>
             <Text style={styles.primaryText}>다시 연결</Text>
           </TouchableOpacity>
         </View>
@@ -98,12 +139,18 @@ export default function ServoRangeScreen() {
             range={range}
             disabled={busy}
             onChange={setRange}
+            onDrag={moveTo}
             colors={colors}
             trackColor={isDark ? "#1e2022" : "#f3f4f6"}
             tickColor={isDark ? "#3a3f44" : "#d1d5db"}
           />
 
           <View style={styles.actions}>
+            <View style={styles.liveRow}>
+              <Text style={[styles.liveLabel, { color: colors.icon }]}>서보에 보낸 각도</Text>
+              <Text style={[styles.liveValue, { color: colors.text }]}>{liveDeg == null ? "-" : `${liveDeg}°`}</Text>
+            </View>
+
             <TouchableOpacity
               style={styles.swapBtn}
               disabled={busy}
@@ -114,7 +161,8 @@ export default function ServoRangeScreen() {
             </TouchableOpacity>
 
             <Text style={[styles.hint, { color: colors.icon }]}>
-              저장하면 새 범위로 한 번 움직여 잠금이 풀릴 수 있습니다. 걸리는 소리가 나면 범위를 줄이세요.
+              손잡이를 잡으면 서보가 그 각도로 바로 움직여 잠금이 풀릴 수 있습니다. 걸리는 소리가 나면 범위를 줄이세요.
+              저장하지 않고 나가면 원래 대기 각도로 돌아갑니다.
             </Text>
 
             <TouchableOpacity style={[styles.primaryBtn, busy && { opacity: 0.5 }]} disabled={busy} onPress={save}>
@@ -151,6 +199,9 @@ const styles = StyleSheet.create({
   body: { padding: 24, gap: 14 },
   sliderBody: { flex: 1, justifyContent: "space-between", gap: 20 },
   actions: { gap: 12 },
+  liveRow: { flexDirection: "row", alignItems: "baseline", justifyContent: "center", gap: 8 },
+  liveLabel: { fontSize: 13 },
+  liveValue: { fontSize: 20, fontWeight: "700", fontVariant: ["tabular-nums"] },
   swapBtn: {
     minHeight: 44,
     flexDirection: "row",
