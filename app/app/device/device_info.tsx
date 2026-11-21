@@ -25,6 +25,7 @@ import { MODEL_LABEL, ModelIcon } from "@/components/model-icon";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useIsFocused } from "@react-navigation/native";
 import Clipboard from "@react-native-clipboard/clipboard";
+import QRCode from "react-native-qrcode-svg";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { router } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -351,6 +352,8 @@ export default function DeviceInfoView() {
   } | null>(null);
 
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
+  const [qrOpenCode, setQrOpenCode] = useState<string | null>(null);
+  const [inviteLinkExpanded, setInviteLinkExpanded] = useState(false);
   const [inviteCodes, setInviteCodes] = useState<
     {
       invite_code: string;
@@ -619,6 +622,7 @@ export default function DeviceInfoView() {
     setInviteResult(null);
     setInviteRole("member");
     setInviteWithToken(false);
+    setInviteLinkExpanded(false);
     handleGuestTokenReset();
   };
 
@@ -1545,7 +1549,7 @@ export default function DeviceInfoView() {
                 <Text style={[styles.modalTitle, { color: colors.text }]}>초대 코드 생성</Text>
               </View>
 
-              <ScrollView style={{ flexGrow: 0 }} contentContainerStyle={{ gap: 20 }}
+              <ScrollView style={{ flexGrow: 0, flexShrink: 1 }} contentContainerStyle={{ gap: 20 }}
                 keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
               {inviteResult ? (
                 <View
@@ -1565,9 +1569,22 @@ export default function DeviceInfoView() {
                     초대 코드
                   </Text>
                   <View style={styles.resultCodeRow}>
-                    <Text selectable style={[styles.resultCode, { color: colors.text }]}>
-                      {buildInviteUrl(inviteResult.invite_code)}
-                    </Text>
+                    <TouchableOpacity
+                      style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 4 }}
+                      onPress={() => setInviteLinkExpanded((v) => !v)}
+                    >
+                      <Text
+                        numberOfLines={inviteLinkExpanded ? undefined : 1}
+                        style={[styles.resultCode, { color: colors.text }]}
+                      >
+                        {buildInviteUrl(inviteResult.invite_code)}
+                      </Text>
+                      <MaterialCommunityIcons
+                        name={inviteLinkExpanded ? "chevron-up" : "chevron-down"}
+                        size={18}
+                        color={colors.tabIconDefault}
+                      />
+                    </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.copyBtn, { backgroundColor: "#3B82F6" }]}
                       onPress={() => {
@@ -1578,6 +1595,9 @@ export default function DeviceInfoView() {
                       <MaterialCommunityIcons name="content-copy" size={14} color="#fff" />
                       <Text style={styles.copyBtnText}>복사</Text>
                     </TouchableOpacity>
+                  </View>
+                  <View style={styles.qrBox}>
+                    <QRCode value={buildInviteUrl(inviteResult.invite_code)} size={140} />
                   </View>
                 </View>
               ) : (
@@ -1798,6 +1818,21 @@ export default function DeviceInfoView() {
                           {buildInviteUrl(item.invite_code)}
                         </Text>
                         <TouchableOpacity
+                          style={styles.codeIconBtn}
+                          hitSlop={6}
+                          onPress={() =>
+                            setQrOpenCode((c) => (c === item.invite_code ? null : item.invite_code))
+                          }
+                        >
+                          <MaterialCommunityIcons
+                            name="qrcode"
+                            size={20}
+                            color={qrOpenCode === item.invite_code ? "#3B82F6" : colors.tabIconDefault}
+                          />
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.codeIconBtn}
+                          hitSlop={6}
                           onPress={() => {
                             Clipboard.setString(buildInviteUrl(item.invite_code));
                             showAlert("복사됨", "초대 링크가 복사되었습니다.");
@@ -1805,11 +1840,16 @@ export default function DeviceInfoView() {
                         >
                           <MaterialCommunityIcons
                             name="content-copy"
-                            size={13}
+                            size={18}
                             color={colors.tabIconDefault}
                           />
                         </TouchableOpacity>
                       </View>
+                      {qrOpenCode === item.invite_code && (
+                        <View style={styles.qrBox}>
+                          <QRCode value={buildInviteUrl(item.invite_code)} size={140} />
+                        </View>
+                      )}
                       <View style={styles.codeItemFooter}>
                         {item.created_at && (
                           <Text style={[styles.codeDate, { color: colors.tabIconDefault }]}>
@@ -2418,6 +2458,14 @@ const styles = StyleSheet.create({
     backgroundColor: "#e5e7eb",
     marginVertical: 8,
   },
+  // 다크 모드에서도 인식되도록 흰 배경 고정
+  qrBox: {
+    alignSelf: "center",
+    marginTop: 8,
+    padding: 10,
+    backgroundColor: "#fff",
+    borderRadius: 8,
+  },
   resultCodeRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -2501,6 +2549,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 10,
     paddingVertical: 8,
+  },
+  codeIconBtn: {
+    padding: 4,
   },
   codeValue: {
     flex: 1,
