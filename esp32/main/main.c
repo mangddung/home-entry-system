@@ -7,6 +7,7 @@
 
 #include "nvs_flash.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -14,6 +15,16 @@
 static const char *TAG = "main";
 
 // ── BOOT button: hold 5s → factory reset ─────────────────────────────────────
+// 눌림(하강 에지) 인터럽트로 깨어나 누르고 있는 동안만 100ms 폴링한다(상시 폴링은 CPU를 계속 깨운다).
+static TaskHandle_t s_btn_task;
+
+static void IRAM_ATTR boot_btn_isr(void *arg)
+{
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(s_btn_task, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
 static void boot_btn_task(void *arg)
 {
     gpio_config_t btn_cfg = {
@@ -21,11 +32,15 @@ static void boot_btn_task(void *arg)
         .mode          = GPIO_MODE_INPUT,
         .pull_up_en    = GPIO_PULLUP_ENABLE,
         .pull_down_en  = GPIO_PULLDOWN_DISABLE,
-        .intr_type     = GPIO_INTR_DISABLE,
+        .intr_type     = GPIO_INTR_NEGEDGE,
     };
+    s_btn_task = xTaskGetCurrentTaskHandle();
     gpio_config(&btn_cfg);
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(BOOT_BTN_GPIO, boot_btn_isr, NULL));
 
     for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         if (gpio_get_level(BOOT_BTN_GPIO) == 0) {
             uint32_t held_ms = 0;
             while (gpio_get_level(BOOT_BTN_GPIO) == 0) {
@@ -39,7 +54,6 @@ static void boot_btn_task(void *arg)
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -52,6 +66,16 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+#if CONFIG_PM_ENABLE
+    // 쉴 때 CPU 클럭을 XTAL(40MHz)까지 낮춘다. light sleep은 BLE 절전(CONFIG_BT_LE_SLEEP_ENABLE)을 켤 때 함께 켠다.
+    esp_pm_config_t pm_cfg = {
+        .max_freq_mhz       = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz       = 40,
+        .light_sleep_enable = false,
+    };
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_cfg));
+#endif
 
     device_config_load();
     led_indicator_init();

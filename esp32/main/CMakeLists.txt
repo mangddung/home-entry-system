@@ -14,6 +14,7 @@ set(reqs
     esp_timer
     led_strip
     espressif__cjson
+    esp_pm
     mbedtls
 )
 

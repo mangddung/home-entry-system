@@ -10,6 +10,9 @@
 //   Zigbee 네트워크 키를 가진 다른 노드(같은 게이트웨이에 붙은 전구 등)가 "인증 성공" 응답을 위조해 문을 열지 못하게 한다.
 // ponytail: 요청 재전송(옛 RESET 등) 방지는 서버 중복 제거(짧은 TTL)뿐이다. install code·카운터 단계에서 보완.
 //
+// Sleepy End Device: 수신기는 꺼 두고 ZB_POLL_MS마다 부모에게 쌓인 메시지를 가져온다.
+// 응답을 기다리는 동안만 ZB_FAST_POLL_MS로 당긴다(keepalive 주기 = poll 주기, esp-zigbee-lib 2.x).
+//
 // 표준 Door Lock 클러스터는 잠금 상태 보고용이다. 표준 lock/unlock 명령은 서버의 멤버/게스트
 // 권한 체크를 거치지 않는 경로라 거부한다(원격 열기는 서버 명령 경로로 추가할 것).
 #include "transport.h"
@@ -72,6 +75,9 @@ enum {
 #define ZB_SETUP_JOIN_MS   (60 * 1000)    // 셋업 시 네트워크 가입 대기 (서버가 permit join을 180초 연다)
 #define ZB_SETUP_SERVER_MS (60 * 1000)    // 셋업 시 서버 응답 대기 (Z2M 인터뷰가 끝나야 메시지가 전달된다)
 #define ZB_RSP_TIMEOUT_MS  5000
+// 평소 poll 주기. 게이트웨이(Z-Stack)가 잠든 기기 몫 메시지를 약 7초만 들고 있어 그보다 짧게 둔다.
+#define ZB_POLL_MS          5000
+#define ZB_FAST_POLL_MS     200
 
 typedef struct {
     uint8_t type;
@@ -92,6 +98,7 @@ static volatile bool      s_steer_allowed = false;  // 셋업 모드에선 앱�
 // 재시도 타이머가 할 일: 저장된 네트워크가 있으면 재가입(INITIALIZATION), 없으면 새 가입(STEERING).
 // 새 가입은 게이트웨이가 permit join을 열어야만 되므로 이미 가입했던 기기의 재가입에 쓰면 계속 거절된다.
 static volatile uint8_t   s_retry_mode    = EZB_BDB_MODE_NETWORK_STEERING;
+static int                s_fast_poll_users;   // 응답 대기 중인 요청 수 (Zigbee 락 안에서만 바꾼다)
 
 // ── 메시지 인증 ───────────────────────────────────────────────────────────────
 static bool zb_mac(const uint8_t *in, size_t in_len, uint8_t tag[ZB_TAG_LEN])
@@ -135,10 +142,21 @@ static bool zb_send(const uint8_t *msg, uint8_t msg_len)
     return true;
 }
 
+// 응답 대기 중에는 poll을 당긴다. 동시에 기다리는 요청이 있으면 마지막 요청이 끝날 때 되돌린다.
+static void zb_fast_poll(bool on)
+{
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    s_fast_poll_users += on ? 1 : -1;
+    if (s_fast_poll_users == (on ? 1 : 0)) {
+        ezb_nwk_set_keepalive_interval(on ? ZB_FAST_POLL_MS : ZB_POLL_MS);
+    }
+    esp_zigbee_lock_release();
+}
+
 // 요청을 보내고 같은 seq + 올바른 태그의 응답을 기다린다. 응답이 없으면 false.
 // 성공하면 rsp->len은 태그를 뺀 data 길이다.
-static bool zb_request(uint8_t type, const void *data, uint8_t len,
-                       uint8_t rsp_type, zb_msg_t *rsp, uint32_t timeout_ms)
+static bool zb_send_and_wait(uint8_t type, const void *data, uint8_t len,
+                             uint8_t rsp_type, zb_msg_t *rsp, uint32_t timeout_ms)
 {
     if (len > ZB_MSG_MAX) return false;
     QueueHandle_t q = s_rsp_q[rsp_type - ZB_RSP_FIRST];
@@ -172,6 +190,15 @@ static bool zb_request(uint8_t type, const void *data, uint8_t len,
         rsp->len = data_len;
         return true;
     }
+}
+
+static bool zb_request(uint8_t type, const void *data, uint8_t len,
+                       uint8_t rsp_type, zb_msg_t *rsp, uint32_t timeout_ms)
+{
+    zb_fast_poll(true);
+    bool ok = zb_send_and_wait(type, data, len, rsp_type, rsp, timeout_ms);
+    zb_fast_poll(false);
+    return ok;
 }
 
 // ── 수신 (Zigbee 태스크 컨텍스트: 막히는 작업 금지, 큐로 넘긴다) ──────────────
@@ -246,7 +273,7 @@ static void create_device(void)
 {
     ezb_af_device_desc_t      dev_desc = ezb_af_create_device_desc();
     ezb_zha_door_lock_config_t lock_cfg = EZB_ZHA_DOOR_LOCK_CONFIG();
-    lock_cfg.basic_cfg.power_source    = EZB_ZCL_BASIC_POWER_SOURCE_SINGLE_PHASE_MAINS;  // 현 단계 상시 전원
+    lock_cfg.basic_cfg.power_source    = EZB_ZCL_BASIC_POWER_SOURCE_BATTERY;
     lock_cfg.door_lock_cfg.lock_state  = EZB_ZCL_DOOR_LOCK_LOCK_STATE_LOCKED;  // 서보는 열고 바로 다시 잠근다
     ezb_af_ep_desc_t ep_desc = ezb_zha_create_door_lock(ZB_EP_ID, &lock_cfg);
 
@@ -365,7 +392,7 @@ static void zb_main_task(void *arg)
         .device_config = {
             .device_type         = EZB_NWK_DEVICE_TYPE_END_DEVICE,
             .install_code_policy = false,  // TODO(install code): 기기별 링크 키 가입은 향후 단계
-            .zed_config          = {.ed_timeout = EZB_NWK_ED_TIMEOUT_64MIN, .keep_alive = 4000},
+            .zed_config          = {.ed_timeout = EZB_NWK_ED_TIMEOUT_64MIN, .keep_alive = ZB_POLL_MS},
         },
         .platform_config = {
             .storage_partition_name = "nvs",
@@ -373,8 +400,8 @@ static void zb_main_task(void *arg)
         },
     };
     ESP_ERROR_CHECK(esp_zigbee_init(&config));
-    // 현 단계는 수신 상시 End Device(상시 전원). 배터리 구동 단계에서 SED로 바꾼다.
-    ezb_set_rx_on_when_idle(true);
+    // Sleepy End Device: 가입 때 부모에게 알리는 값이라 셋업(가입) 전부터 false로 둔다
+    ezb_set_rx_on_when_idle(false);
     ezb_aps_secur_enable_distributed_security(false);
     ESP_ERROR_CHECK(ezb_bdb_set_primary_channel_set(ZB_ALL_CHANNELS_MASK));
     ESP_ERROR_CHECK(ezb_bdb_set_secondary_channel_set(0));

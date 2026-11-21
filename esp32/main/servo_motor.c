@@ -36,7 +36,7 @@ void servo_init(void)
         .timer_num       = SERVO_LEDC_TIMER,
         .duty_resolution = SERVO_LEDC_RESOLUTION,
         .freq_hz         = SERVO_FREQ_HZ,
-        .clk_cfg         = LEDC_AUTO_CLK,
+        .clk_cfg         = LEDC_USE_XTAL_CLK,  // CPU 클럭을 낮춰도(PM) 펄스 폭이 흔들리지 않게 고정 클럭
     };
     ESP_ERROR_CHECK(ledc_timer_config(&timer));
 

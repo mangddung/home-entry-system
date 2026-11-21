@@ -1,10 +1,13 @@
 # Zigbee 모델 (Zigbee → 게이트웨이 → MQTT → 서버)
 CONFIG_DOORLOCK_TRANSPORT_ZIGBEE=y
 
-# 현 단계는 수신 상시 End Device(상시 전원). 배터리 구동 단계에서 SED + light sleep으로 전환.
+# Sleepy End Device(transport_zigbee.c: rx_on_when_idle=false, 5초 poll). light sleep은 BLE 절전과 함께 켠다.
 CONFIG_ZB_ENABLED=y
 CONFIG_ZB_ZED=y
 CONFIG_ZB_RADIO_NATIVE=y
+
+# 쉴 때 CPU 클럭 낮춤(main.c esp_pm_configure)
+CONFIG_PM_ENABLE=y
 
 # 로그는 INFO까지만: 공통 기본값(DEBUG)이면 Zigbee 스택 메인 루프의 vfs select 디버그 로그가 115200bps UART를
 # 가득 채워, 출력에 막힌 Zigbee 태스크가 가입·인터뷰 응답 시간을 놓친다.
