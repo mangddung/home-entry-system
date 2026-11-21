@@ -4,6 +4,7 @@ set(srcs
     "led_indicator.c"
     "servo_motor.c"
     "ble_server.c"
+    "battery.c"
 )
 set(reqs
     nvs_flash
@@ -11,6 +12,7 @@ set(reqs
     bt
     esp_driver_gpio
     esp_driver_ledc
+    esp_adc
     esp_timer
     led_strip
     espressif__cjson

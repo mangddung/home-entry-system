@@ -15,6 +15,7 @@ import {
 } from "@/lib/constants";
 import { checkAuthToken, getTokenSecure, setTokenSecure } from "@/lib/token-storage";
 import { IoTDevice } from "@/lib/types";
+import { BatteryStatus } from "@/components/battery-status";
 import { ModelIcon } from "@/components/model-icon";
 import { Provider } from "@ant-design/react-native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
@@ -223,6 +224,8 @@ export default function HomeScreen() {
                 // 서버 미연결이면 캐시된 last_ping_at이 낡았으므로 기기 상태를 판단하지 않는다
                 const pingColor = isOnline ? getPingColor(device.last_ping_at) : "#9ca3af";
                 const pingLabel = !isOnline ? "확인 불가" : pingColor === "#22c55e" ? "온라인" : pingColor === "#eab308" ? "대기중" : "오프라인";
+                // Zigbee 모델만 표시한다. 기기와 연락이 끊기면 마지막 잔량이 낡았으므로 숨긴다
+                const batteryPercent = device.transport === "zigbee" && isOnline && pingColor !== "#ef4444" ? device.battery_percent : null;
                 return (
                   <TouchableOpacity
                     key={device.device_uuid}
@@ -266,6 +269,16 @@ export default function HomeScreen() {
                         <Text style={[styles.roleChipText, { color: roleAccent.pillColor }]}>{roleAccent.label}</Text>
                       </View>
                       <View style={styles.pingRow}>
+                        {batteryPercent != null && (
+                          <View style={{ marginRight: 4 }}>
+                            <BatteryStatus
+                              percent={batteryPercent}
+                              size={12}
+                              color={colors.icon}
+                              textStyle={styles.pingLabel}
+                            />
+                          </View>
+                        )}
                         <ModelIcon transport={device.transport} size={12} color={colors.icon} />
                         <View style={[styles.pingDot, { backgroundColor: pingColor }]} />
                         <Text style={[styles.pingLabel, { color: pingColor }]}>{pingLabel}</Text>

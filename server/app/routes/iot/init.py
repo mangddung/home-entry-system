@@ -288,8 +288,24 @@ def iot_ping():
     # last_ping_at은 _decode_device_token에서 갱신된다(기기 요청 전체 공통)
     device_uuid = payload.get("sub")
 
+    data = request.get_json(silent=True)
+    save_battery(device_uuid, data.get("battery_mv") if isinstance(data, dict) else None)
+
     registered = is_registered(device_uuid)
     return jsonify({"status": "success", "message": "pong", "registered": registered}), 200
+
+
+BATTERY_MV_MIN, BATTERY_MV_MAX = 2500, 4500  # 단일 LiPo 셀로 볼 수 있는 범위
+
+def save_battery(device_uuid: str, mv) -> None:
+    """ping의 셀 전압을 저장한다. Wi-Fi /iot/ping과 Zigbee ping이 같이 쓴다.
+    값이 없거나 범위를 벗어나면 NULL로 지워 앱이 낡은 잔량을 보여주지 않게 한다."""
+    valid = isinstance(mv, int) and not isinstance(mv, bool) and BATTERY_MV_MIN <= mv <= BATTERY_MV_MAX
+    with _db.Session() as session:
+        device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()
+        if device:
+            device.battery_mv = mv if valid else None
+            session.commit()
 
 
 def is_registered(device_uuid: str) -> bool:

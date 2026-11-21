@@ -21,6 +21,7 @@ import { DEVICES_REFRESHED_EVENT, GEOFENCE_RADIUS_M, IS_ONLINE_KEY, SELECTED_DEV
 import type { ScheduleWindow } from "@/lib/schedule";
 import { getTokenSecure } from "@/lib/token-storage";
 import { MemberInfo, type IoTDevice } from "@/lib/types";
+import { BatteryStatus } from "@/components/battery-status";
 import { MODEL_LABEL, ModelIcon } from "@/components/model-icon";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useIsFocused } from "@react-navigation/native";
@@ -1221,6 +1222,8 @@ export default function DeviceInfoView() {
   const pingLabel = !isOnline
     ? "확인 불가"
     : pingColor === "#22c55e" ? "온라인" : pingColor === "#eab308" ? "대기" : "오프라인";
+  // Zigbee 모델만 표시한다. 기기와 연락이 끊기면 마지막 잔량이 낡았으므로 숨긴다
+  const batteryPercent = device.transport === "zigbee" && isOnline && pingColor !== "#ef4444" ? device.battery_percent : null;
 
   return (
     <SafeAreaView
@@ -1241,6 +1244,12 @@ export default function DeviceInfoView() {
               <Image
                 source={require("@/assets/images/icon-door-lock.png")}
                 style={styles.deviceIcon}
+              />
+              {/* 카드 배경색 테두리로 역할 색 배경과 분리한다 */}
+              <View
+                style={[styles.statusBadge, { backgroundColor: pingColor, borderColor: cardBg }]}
+                accessible
+                accessibilityLabel={`기기 상태 ${pingLabel}`}
               />
             </View>
             <View style={{ flex: 1, gap: 3 }}>
@@ -1294,12 +1303,14 @@ export default function DeviceInfoView() {
                   {MODEL_LABEL[device.transport ?? "wifi"]}
                 </Text>
               </View>
-              <View style={styles.deviceStatus}>
-                <View style={[styles.pingDot, { backgroundColor: pingColor }]} />
-                <Text style={[styles.deviceStatusText, { color: colors.tabIconDefault }]}>
-                  {pingLabel}
-                </Text>
-              </View>
+              {batteryPercent != null && (
+                <BatteryStatus
+                  percent={batteryPercent}
+                  size={13}
+                  color={colors.tabIconDefault}
+                  textStyle={styles.deviceStatusText}
+                />
+              )}
               <TouchableOpacity
                 style={[styles.cardActionBtn, { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" }]}
                 onPress={openActivityLog}
@@ -2676,10 +2687,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  pingDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+  statusBadge: {
+    position: "absolute",
+    right: -3,
+    bottom: -3,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 3,
   },
   stepperRow: {
     flexDirection: "row",

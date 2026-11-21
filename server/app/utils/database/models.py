@@ -94,6 +94,8 @@ class DeviceManagement(Base):
     current_jti           = Column(String(36), nullable=True)
     # 근접 해제 기기 임계값(dBm, 마스터가 보정). NULL이면 앱이 첫 발견 즉시 연결(기존 동작).
     rssi_threshold        = Column(Integer, nullable=True)
+    # 마지막 ping의 셀 전압(mV). 셀이 없거나 값이 범위를 벗어나면 NULL.
+    battery_mv            = Column(Integer, nullable=True)
     # 제품 모델(서버 통신 경로): "wifi"(HTTP 직접) / "zigbee"(게이트웨이 → MQTT). gen_config가 기록.
     transport             = Column(String(10), nullable=False, default="wifi", server_default="wifi")
     # 칩 EUI-64 ("0x" + 16 hex, Z2M friendly name 형식). Zigbee 기기는 이 값으로 식별한다.

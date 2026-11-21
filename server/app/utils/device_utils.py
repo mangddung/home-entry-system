@@ -28,6 +28,20 @@ def hw_fields(device) -> dict:
     """기기 행을 지우고 다시 만드는 경로(설정 완료·리셋·앱 삭제)에서 그대로 옮겨야 하는 하드웨어 정보."""
     return {"transport": device.transport, "ieee_addr": device.ieee_addr, "gateway_id": device.gateway_id}
 
+# ponytail: 일반 LiPo 무부하 전압의 대략값. 실제 셀의 방전 곡선을 재면 교체한다.
+_BATTERY_CURVE = ((3300, 0), (3600, 10), (3700, 25), (3750, 40), (3800, 55), (3900, 70), (4000, 85), (4150, 100))
+
+def battery_percent(mv: int | None) -> int | None:
+    """셀 전압(mV)을 잔량(%)으로 바꾼다. 곡선이 비선형이라 구간별로 보간한다."""
+    if mv is None:
+        return None
+    if mv <= _BATTERY_CURVE[0][0]:
+        return 0
+    for (low_mv, low_pct), (high_mv, high_pct) in zip(_BATTERY_CURVE, _BATTERY_CURVE[1:]):
+        if mv <= high_mv:
+            return round(low_pct + (mv - low_mv) * (high_pct - low_pct) / (high_mv - low_mv))
+    return 100
+
 def check_device_limit(session, user_uuid: str) -> bool:
     """유저가 등록/참여한 기기 총 개수(역할 무관)가 제한 미만인지 확인"""
     count = session.query(UserDeviceMapping).filter_by(user_uuid=user_uuid).count()

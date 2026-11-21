@@ -116,6 +116,8 @@ def handle(gateway_id: str, ieee: str, msg: bytes) -> bytes | None:
         return rsp + tag(key, req + rsp)
 
     if mtype == PING:
+        # body = [flags][rand(4)][셀 전압 mV little-endian(2)]. 0이면 셀 없음, 짧으면 전압을 안 싣는 옛 펌웨어
+        iot.save_battery(device_uuid, int.from_bytes(body[5:7], "little") if len(body) >= 7 else None)
         registered = iot.is_registered(device_uuid)
         if body[:1] and body[0] & 0x01 and registered:
             with _db.Session() as session:

@@ -64,6 +64,7 @@ def _apply_schema():
         ("setup_user_uuid",    "ALTER TABLE device_management ADD COLUMN setup_user_uuid VARCHAR(50)"),
         ("setup_requested_at", "ALTER TABLE device_management ADD COLUMN setup_requested_at DATETIME"),
         ("rssi_threshold",     "ALTER TABLE device_management ADD COLUMN rssi_threshold INTEGER"),
+        ("battery_mv",         "ALTER TABLE device_management ADD COLUMN battery_mv INTEGER"),
         # Zigbee 모델 추가: 기존 기기는 모두 Wi-Fi 모델
         ("transport",  "ALTER TABLE device_management ADD COLUMN transport VARCHAR(10) NOT NULL DEFAULT 'wifi'"),
         ("ieee_addr",  "ALTER TABLE device_management ADD COLUMN ieee_addr VARCHAR(18)"),

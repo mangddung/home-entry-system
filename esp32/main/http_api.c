@@ -4,6 +4,7 @@
 #include "ble_server.h"
 #include "servo_motor.h"
 #include "led_indicator.h"
+#include "battery.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
@@ -392,6 +393,11 @@ static void task_ping(void *arg)
         resp_buf_t rb = { .buf = resp_body, .size = sizeof(resp_body), .len = 0 };
         int status = 0;
 
+        // 셀이 없으면 battery_mv를 빼서 서버가 잔량을 지우게 한다
+        char ping_body[32] = "{}";
+        int battery_mv = battery_read_mv();
+        if (battery_mv > 0) snprintf(ping_body, sizeof(ping_body), "{\"battery_mv\":%d}", battery_mv);
+
         for (int attempt = 0; attempt < 2; attempt++) {
             snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_cfg.device_token);
             rb.len = 0;
@@ -411,7 +417,7 @@ static void task_ping(void *arg)
             esp_http_client_set_header(client, "Content-Type",  "application/json");
             esp_http_client_set_header(client, "User-Agent",    "esphome/doorl-device");
             esp_http_client_set_header(client, "Authorization", auth_header);
-            esp_http_client_set_post_field(client, "{}", 2);
+            esp_http_client_set_post_field(client, ping_body, (int)strlen(ping_body));
 
             esp_err_t err = esp_http_client_perform(client);
             status = 0;

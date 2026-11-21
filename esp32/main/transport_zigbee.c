@@ -23,6 +23,7 @@
 #include "led_indicator.h"
 #include "servo_motor.h"
 #include "ble_server.h"
+#include "battery.h"
 
 #include "esp_log.h"
 #include "esp_random.h"
@@ -59,7 +60,7 @@ static const char *TAG = "zigbee";
 #define ZB_ALL_CHANNELS_MASK 0x07FFF800U  // 11~26. 채널은 게이트웨이(Z2M)가 정한다
 
 enum {
-    ZB_MSG_PING           = 0x01,  // data: [flags] bit0 = 부팅 직후, + rand(4) (응답 재사용 방지)
+    ZB_MSG_PING           = 0x01,  // data: [flags] bit0 = 부팅 직후, + rand(4) (응답 재사용 방지), + 셀 전압 mV(2, little-endian, 0 = 없음)
     ZB_MSG_VALIDATE_TOKEN = 0x02,  // data: nonce(8) + mac(32)
     ZB_MSG_VALIDATE_SETUP = 0x03,  // data: setup_token (ASCII)
     ZB_MSG_RESET          = 0x04,  // data: -
@@ -485,10 +486,12 @@ static void zb_ping_task(void *arg)
     bool init_ok = false;
     for (;;) {
         zb_wait_joined(portMAX_DELAY);
-        uint8_t body[1 + 4];
+        uint8_t body[1 + 4 + 2];
         body[0] = init_ok ? 0 : 0x01;
         uint32_t rnd = esp_random();
         memcpy(body + 1, &rnd, 4);
+        uint16_t battery_mv = (uint16_t)battery_read_mv();
+        memcpy(body + 5, &battery_mv, 2);
         zb_msg_t rsp;
         uint32_t delay_ms = ZB_PING_RETRY_MS;
         if (zb_request(ZB_MSG_PING, body, sizeof(body), ZB_MSG_PING_RESULT, &rsp, ZB_RSP_TIMEOUT_MS * 2) &&

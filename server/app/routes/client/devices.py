@@ -18,7 +18,7 @@ from app.utils.database import UserDeviceMapping, DeviceManagement, UserToken
 from app.utils.database.models import DeviceLocation, Settings, User
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
-from app.utils.device_utils import SETUP_CLAIM_TTL, hw_fields
+from app.utils.device_utils import SETUP_CLAIM_TTL, battery_percent, hw_fields
 from app.utils.mqtt_utils import notify_zigbee_check_registration, open_zigbee_join
 from app.routes.client.auth import verify_access_token
 
@@ -113,6 +113,8 @@ def get_user_devices():
                 } if m.device.location else None,
                 "last_ping_at": m.device.last_ping_at.isoformat() + "Z" if m.device.last_ping_at else None,
                 "rssi_threshold": m.device.rssi_threshold,
+                # Wi-Fi 모델은 상시 전원이라 보여주지 않는다
+                "battery_percent": battery_percent(m.device.battery_mv) if m.device.transport == "zigbee" else None,
                 "transport": m.device.transport,
             }
             for m in mappings
