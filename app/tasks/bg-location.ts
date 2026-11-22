@@ -1,5 +1,11 @@
 import { checkBluetoothPermission } from "@/hooks/request-ble-permit";
-import { reregisterGeoFence, setBleScanning, startTrackingService, stopTrackingService } from "@/lib/background-tracking";
+import {
+  GEOFENCE_EVENT_NOTIFICATION_PREFIX,
+  reregisterGeoFence,
+  setBleScanning,
+  startTrackingService,
+  stopTrackingService,
+} from "@/lib/background-tracking";
 import { authLog, short } from "@/lib/auth-log";
 import { scanDevice, stopScan, userTokenExchange } from "@/lib/ble";
 import { getThresholdFor, recordTrigger } from "@/lib/proximity";
@@ -11,7 +17,8 @@ import {
   DEVICE_STATUS_KEY,
 } from "@/lib/constants";
 import { isTokenAlive } from "@/lib/schedule";
-import { appendSystemLog } from "@/lib/system-log";
+import { getDevSettings } from "@/lib/dev-settings";
+import { appendLog, appendSystemLog } from "@/lib/system-log";
 import { getTokenSecure } from "@/lib/token-storage";
 import { DeviceStatus, IoTDevice } from "@/lib/types";
 import {
@@ -23,6 +30,7 @@ import {
   startStepWatch,
   stopStepWatch,
 } from "@/modules/activity-transition";
+import notifee, { AndroidImportance } from "@notifee/react-native";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import { AppState } from "react-native";
@@ -49,6 +57,61 @@ const bleAbort = new Set<string>();
 const bleStopReason = new Map<string, string>(); // 자동 인증 로그용 중단 사유
 
 const secs = (ms: number) => `${Math.round(ms / 1000)}초`;
+
+const distanceM = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const rad = Math.PI / 180;
+  const a =
+    Math.sin(((lat2 - lat1) * rad) / 2) ** 2 +
+    Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(((lon2 - lon1) * rad) / 2) ** 2;
+  return 12742000 * Math.asin(Math.sqrt(a)); // 지구 지름(m) × asin
+};
+
+// 진입·이탈 시점의 위치를 GPS 탭에 남기고 알림으로 띄운다. expo-location은 지오펜스를 발동시킨 위치(triggeringLocation)를
+// 넘겨주지 않아 OS의 마지막 위치로 대신한다(대개 판정에 쓰인 그 위치). 위치 시각으로 이벤트 전달 지연을 본다.
+const reportGeofenceEvent = async (kind: "enter" | "exit", region: Location.LocationRegion) => {
+  const uuid = region.identifier ?? "";
+  const dev = short(uuid);
+  const { geofenceNotify, geofenceLocationLog } = await getDevSettings();
+  if (!geofenceNotify && !geofenceLocationLog) return;
+  const log = (log_type: string, message: string) => geofenceLocationLog && appendLog({ event_name: dev, log_type, message });
+  let summary = "위치 없음";
+  try {
+    const loc = await Location.getLastKnownPositionAsync();
+    if (!loc) {
+      log("INFO", `${kind}: 마지막 위치 없음`);
+    } else {
+      const { latitude, longitude, accuracy } = loc.coords;
+      const dist = distanceM(latitude, longitude, region.latitude, region.longitude);
+      const acc = accuracy != null ? Math.round(accuracy) : "?";
+      const age = secs(Date.now() - loc.timestamp);
+      summary = `기기까지 ${Math.round(dist)}m (반경 ${region.radius}m) · 정확도 ${acc}m · 위치 시각 ${age} 전`;
+      log("INFO", `${kind}: ${latitude.toFixed(6)}, ${longitude.toFixed(6)} · ${summary}`);
+    }
+  } catch (e) {
+    summary = "위치 조회 실패";
+    log("ERROR", `${kind}: 위치 조회 실패: ${e}`);
+  }
+  if (!geofenceNotify) return;
+
+  // 별도 채널이라 시스템 설정에서 이 알림만 끌 수 있다. 기기마다 id 하나라 이탈 알림이 진입 알림을 덮어써 쌓이지 않는다.
+  try {
+    const name = (await loadDevices()).find((d) => d.device_uuid === uuid)?.device_nickname || dev;
+    const channelId = await notifee.createChannel({ id: "geofence", name: "진입·이탈", importance: AndroidImportance.DEFAULT });
+    // 고정(ongoing). Android 14+에서 밀어 지우면 app-handlers가 다시 띄운다(repinNotification).
+    // 다시 띄워도 이벤트 시각이 유지되게 timestamp를 명시한다
+    await notifee.displayNotification({
+      id: `${GEOFENCE_EVENT_NOTIFICATION_PREFIX}${uuid}`,
+      title: `${name} ${kind === "enter" ? "반경 진입" : "반경 이탈"}`,
+      body: summary,
+      android: {
+        channelId, groupId: "geofence", ongoing: true, pressAction: { id: "default" },
+        timestamp: Date.now(), showTimestamp: true,
+      },
+    });
+  } catch (e) {
+    authLog("ERROR", `${dev} 진입·이탈 알림 실패: ${e}`);
+  }
+};
 
 // 기존 GPS 폴링(distanceInterval 10m + haversine 거리계산) 기반 트리거 (native geofence로 대체, 주석 처리)
 // ================================================================================
@@ -174,6 +237,7 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
   const startedAt = Date.now();
   let lastBurst: boolean | null = null;
   let stillDenied: boolean | null = null; // null = 아직 판정 전(첫 회차에 판정 결과를 남긴다)
+  let lastStillLogAt = Date.now(); // 보류 시작 줄이 이미 있으니 첫 진단 줄은 1분 뒤
   let attempts = 0;
   let lastThreshold: number | null | undefined;
   let triggerRssi: number | null = null;
@@ -200,9 +264,11 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
 
       // 오래 걷지 않았으면 스캔·토큰 교환을 건너뛰고, 다시 걸으면 다음 회차에 바로 재개한다.
       // 걸음 센서를 못 읽으면(null) 기존 동작대로 진행한다.
+      // 디버그 설정은 회차마다 읽어 진행 중인 루프에도 바로 반영한다
+      const settings = await getDevSettings();
       const lastStepAt = getLastStepAt();
       const idleMs = lastStepAt == null ? null : Date.now() - lastStepAt;
-      const denied = idleMs != null && idleMs >= STILL_DENY_MS;
+      const denied = settings.stillCheck && idleMs != null && idleMs >= STILL_DENY_MS;
       if (denied !== stillDenied) {
         const first = stillDenied === null;
         stillDenied = denied;
@@ -217,7 +283,9 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
           "ACTIVITY",
           denied
             ? `${dev} 자동 해제 보류: 마지막 걸음 ${secs(idleMs!)} 전 (기준 ${STILL_DENY_MS / 60000}분)`
-            : idleMs == null
+            : !settings.stillCheck
+              ? `${dev} 정지 판정 꺼짐(디버그 설정) → 걸음과 관계없이 진행`
+              : idleMs == null
               ? `${dev} 걸음 센서 응답 없음 → 정지 판정 없이 진행`
               : `${dev} 자동 해제 ${first ? "허용" : "재개"}: 마지막 걸음 ${secs(idleMs)} 전`,
         );
@@ -226,6 +294,12 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
         lastBurst = null;
       }
       if (denied) {
+        // 진단: 걷는 중인데 정지로 남는 원인 구분용. 이 줄이 1분마다 찍히면 타이머는 돌고 걸음만 안 들어오는 것,
+        // 줄 사이가 크게 비면 프로세스(타이머) 자체가 멈춘 것이다. AppState로 앱이 열려 있었는지도 본다.
+        if (settings.stillHeartbeat && Date.now() - lastStillLogAt >= 60 * 1000) {
+          lastStillLogAt = Date.now();
+          authLog("ACTIVITY", `${dev} 정지 대기 중: 마지막 걸음 ${secs(idleMs!)} 전 · 앱 ${AppState.currentState}`);
+        }
         await bgSleep(BLE_RETRY_INTERVAL_MS);
         continue;
       }
@@ -237,10 +311,14 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
         void setBleScanning(uuid, burst ? "fast" : "saving");
       }
       // 근접 문턱(내 보정 > 기기 임계값). 없으면 기존처럼 첫 발견 즉시 연결.
-      const threshold = await getThresholdFor(device);
+      const threshold = settings.rssiGate ? await getThresholdFor(device) : null;
       if (threshold !== lastThreshold) {
         lastThreshold = threshold;
-        trace(threshold == null ? "근접 문턱 없음 → 발견 즉시 연결" : `근접 문턱 ${threshold}dBm (내 보정 > 기기 기준)`);
+        trace(
+          threshold != null
+            ? `근접 문턱 ${threshold}dBm (내 보정 > 기기 기준)`
+            : `근접 문턱 ${settings.rssiGate ? "없음" : "꺼짐(디버그 설정)"} → 발견 즉시 연결`,
+        );
       }
       const gate =
         threshold == null
@@ -365,6 +443,7 @@ TaskManager.defineTask(BG_GEOFENCE_TASK, async ({ data, error }) => {
   // 겹친 지오펜스는 영역마다 태스크가 따로 동시에 돌므로 상태 저장은 updateDeviceStatus로 직렬화한다
   if (eventType === Location.LocationGeofencingEventType.Enter) {
     appendSystemLog({ event_name: uuid, log_type: "INFO", message: "geofence enter" });
+    void reportGeofenceEvent("enter", region); // BLE 시작을 늦추지 않게 기다리지 않는다
     const enteredAt = Date.now();
     let opened = false;
     await updateDeviceStatus((list) => {
@@ -403,6 +482,7 @@ TaskManager.defineTask(BG_GEOFENCE_TASK, async ({ data, error }) => {
     await startBleTracking(device, enteredAt);
   } else if (eventType === Location.LocationGeofencingEventType.Exit) {
     appendSystemLog({ event_name: uuid, log_type: "INFO", message: "geofence exit" });
+    void reportGeofenceEvent("exit", region);
     authLog("GEOFENCE", `${dev} 이탈${bleInProgress.has(uuid) ? " → BLE 추적 중단" : ""} · 인증 기록 초기화`);
     await updateDeviceStatus((list) => {
       const status = list.find((s) => s.device_uuid === uuid);

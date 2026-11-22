@@ -222,6 +222,15 @@ export default function SettingsScreen() {
           <Text style={[styles.sectionTitle, { color: colors.icon }]}>개발자 도구</Text>
           <View style={[styles.card, { backgroundColor: cardBg }]}>
             <SettingRow
+              icon="tune-variant"
+              iconColor="#fff"
+              iconBg="#f59e0b"
+              label="디버그 설정"
+              textColor={colors.text}
+              onPress={() => router.push("/dev-settings")}
+            />
+            <View style={[styles.divider, { backgroundColor: dividerColor }]} />
+            <SettingRow
               icon="devices"
               iconColor="#fff"
               iconBg="#8b5cf6"

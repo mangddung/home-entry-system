@@ -1,7 +1,7 @@
-// 등록된 기기 위치마다 고정 반경(GEOFENCE_RADIUS_M) geofence를 걸고,
+// 등록된 기기 위치마다 고정 반경(GEOFENCE_RADIUS_M, 디버그 설정에서 조절) geofence를 걸고,
 // 진입 이벤트가 오면 BLE 스캔으로 실제 근접 판정을 넘긴다.
 
-import notifee, { AndroidForegroundServiceType, AndroidImportance } from "@notifee/react-native";
+import notifee, { AndroidForegroundServiceType, AndroidImportance, type Notification } from "@notifee/react-native";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 import { AppState } from "react-native";
@@ -9,10 +9,10 @@ import { loadDevices } from "./api/devices";
 import {
   BG_GEOFENCE_TASK,
   BG_LOCATION_TASK,
-  GEOFENCE_RADIUS_M,
 } from "./constants";
 import { authLog, short } from "./auth-log";
 import { acquireWakeLock, bgSleep, releaseWakeLock } from "@/modules/activity-transition";
+import { getDevSettings } from "./dev-settings";
 import { appendSystemLog } from "./system-log";
 import { IoTDevice } from "./types";
 
@@ -127,6 +127,8 @@ const TRACKING_NOTIFICATION_ID = "geofence-tracking";
 // "fast" = ScanMode.LowLatency (진입 직후), "saving" = ScanMode.Balanced (그 이후),
 // "paused" = 반경 안에서 정지 중이라 자동 해제 보류(걸으면 다시 검색)
 export type BleScanMode = "fast" | "saving" | "paused";
+// 진입·이탈 알림 id 접두사(tasks/bg-location.ts). 기기마다 하나라 이탈이 진입을 덮어쓴다
+export const GEOFENCE_EVENT_NOTIFICATION_PREFIX = "geofence-event-";
 
 // 감시 중인 기기 수와 BLE 스캔 상태를 한 알림에 함께 표시한다.
 // 백그라운드 태스크가 재시작되면 이 값들은 초기화되므로, 없을 때도 문구가 성립해야 한다.
@@ -233,8 +235,9 @@ export const startTrackingService = async () => {
   serviceActive = true;
   try {
     await renderTrackingNotification(true);
-    acquireWakeLock(WAKE_LOCK_TIMEOUT_MS);
-    authLog("SERVICE", "포그라운드 서비스 + wakelock 시작 (화면 꺼짐에도 타이머 유지)");
+    const { wakeLock } = await getDevSettings();
+    if (wakeLock) acquireWakeLock(WAKE_LOCK_TIMEOUT_MS);
+    authLog("SERVICE", wakeLock ? "포그라운드 서비스 + wakelock 시작 (화면 꺼짐에도 타이머 유지)" : "포그라운드 서비스 시작 (wakelock 꺼짐: 디버그 설정)");
   } catch (e) {
     serviceActive = false;
     throw e;
@@ -270,6 +273,26 @@ export const setBleScanning = async (uuid: string, mode: BleScanMode | null) => 
   await renderTrackingNotification();
 };
 
+// Android 14+는 ongoing 알림도 사용자가 밀어서 지울 수 있다. 고정할 알림이 지워지면 바로 다시 띄운다.
+// 트래킹 알림은 지오펜스가 등록돼 있을 때만, 진입·이탈 알림은 디버그 설정이 켜져 있을 때만 되살린다.
+export const repinNotification = async (notification: Notification) => {
+  if (notification.id === TRACKING_NOTIFICATION_ID) {
+    if (await TaskManager.isTaskRegisteredAsync(BG_GEOFENCE_TASK)) await renderTrackingNotification();
+  } else if (notification.id?.startsWith(GEOFENCE_EVENT_NOTIFICATION_PREFIX)) {
+    if ((await getDevSettings()).geofenceNotify) await notifee.displayNotification(notification);
+  }
+};
+
+// 고정이라 사용자가 지울 수 없으므로 로그아웃·설정 끄기 때 직접 내린다
+export const cancelGeofenceEventNotifications = async () => {
+  const shown = await notifee.getDisplayedNotifications();
+  await Promise.all(
+    shown
+      .filter((n) => n.id?.startsWith(GEOFENCE_EVENT_NOTIFICATION_PREFIX))
+      .map((n) => notifee.cancelNotification(n.id!)),
+  );
+};
+
 export const cancelTrackingNotification = async () => {
   bleScanning.clear();
   watchedDeviceCount = null;
@@ -295,9 +318,10 @@ export const updateGeoFence = async () => {
       typeof device.location.longitude === "number" &&
       device.role !== "guest",
   );
+  const radius = (await getDevSettings()).geofenceRadiusM; // 기본 GEOFENCE_RADIUS_M, 디버그 설정에서 조절
   const geoFences = validDevices.map((device) => ({
     identifier: device.device_uuid,
-    radius: GEOFENCE_RADIUS_M,
+    radius,
     latitude: device.location!.latitude,
     longitude: device.location!.longitude,
     notifyOnEntry: true,
@@ -324,7 +348,7 @@ export const updateGeoFence = async () => {
       log_type: "INFO",
       message: `updated geofences: ${geoFences.length}`,
     });
-    authLog("GEOFENCE", `등록 ${geoFences.length}개 (반경 ${GEOFENCE_RADIUS_M}m): ${geoFences.map((g) => short(g.identifier)).join(", ")}`);
+    authLog("GEOFENCE", `등록 ${geoFences.length}개 (반경 ${radius}m): ${geoFences.map((g) => short(g.identifier)).join(", ")}`);
   } else {
     await cancelTrackingNotification();
     authLog("GEOFENCE", "등록 해제: 자동 인증 대상 기기 없음(좌표 없음·게스트만)");
@@ -354,4 +378,5 @@ export const stopBackgroundTracking = async () => {
     // 실제로 실행 중이 아니면 무시
   }
   await cancelTrackingNotification();
+  await cancelGeofenceEventNotifications();
 };

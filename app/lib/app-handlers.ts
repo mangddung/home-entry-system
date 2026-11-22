@@ -4,7 +4,7 @@
 import { fetchDevices } from "@/lib/api/devices";
 import { setupAxiosInterceptors } from "@/lib/api/interceptors";
 import { authLog, short } from "@/lib/auth-log";
-import { updateGeoFence } from "@/lib/background-tracking";
+import { repinNotification, updateGeoFence } from "@/lib/background-tracking";
 import { DEVICES_REFRESHED_EVENT } from "@/lib/constants";
 import { appendFcmNotification } from "@/lib/fcm-log";
 import { createFeedbackFromPush, setPendingFeedbackNav, submitFeedback } from "@/lib/proximity";
@@ -94,6 +94,11 @@ export const handlePush = async (remoteMessage: FirebaseMessagingTypes.RemoteMes
 
 // 알림 버튼(일찍/적당/늦게) → 앱을 띄우지 않고 반영. 본문 탭 → 피드백 화면으로 보낸다.
 export const handleNotifeeEvent = async ({ type, detail }: Event) => {
+  // 고정 알림(트래킹·진입이탈)을 밀어 지우면 다시 띄운다(Android 14+는 ongoing도 지울 수 있다)
+  if (type === EventType.DISMISSED && detail.notification) {
+    await repinNotification(detail.notification);
+    return;
+  }
   const feedbackId = detail.notification?.data?.feedback_id;
   if (typeof feedbackId !== "string") return;
   if (type === EventType.ACTION_PRESS) {
