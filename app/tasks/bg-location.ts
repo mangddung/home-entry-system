@@ -1,7 +1,7 @@
 import { checkBluetoothPermission } from "@/hooks/request-ble-permit";
 import { reregisterGeoFence, setBleScanning, startTrackingService, stopTrackingService } from "@/lib/background-tracking";
 import { authLog, short } from "@/lib/auth-log";
-import { scanDevice, userTokenExchange } from "@/lib/ble";
+import { scanDevice, stopScan, userTokenExchange } from "@/lib/ble";
 import { getThresholdFor, recordTrigger } from "@/lib/proximity";
 import { ScanMode } from "react-native-ble-plx";
 import { loadDevices, updateDeviceStatus } from "@/lib/api/devices";
@@ -221,8 +221,8 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
               ? `${dev} 걸음 센서 응답 없음 → 정지 판정 없이 진행`
               : `${dev} 자동 해제 ${first ? "허용" : "재개"}: 마지막 걸음 ${secs(idleMs)} 전`,
         );
-        // 쉬는 동안 알림이 "검색 중"으로 남지 않게 내리고, 재개 시 다시 그린다
-        if (denied) void setBleScanning(uuid, null);
+        // 쉬는 동안 알림을 "검색 중" 대신 "자동 해제 대기 중"으로 바꾸고, 재개 시 다시 그린다
+        if (denied) void setBleScanning(uuid, "paused");
         lastBurst = null;
       }
       if (denied) {
@@ -413,5 +413,12 @@ TaskManager.defineTask(BG_GEOFENCE_TASK, async ({ data, error }) => {
       return list;
     });
     stopBleTracking(uuid, "지오펜스 이탈");
+    // 루프는 진행 중인 스캔(최대 30~60초)이 끝나야 중단을 확인하므로, 그동안 알림이 "기기 검색 중"으로 남는다.
+    // 스캔을 바로 끝내고 알림도 즉시 되돌린다(루프의 finally도 같은 정리를 한 번 더 한다).
+    // ponytail: 스캔은 기기 하나씩만 도므로 다른 기기 루프의 스캔이 끊겨도 그 루프는 다음 회차에 다시 스캔한다
+    if (bleInProgress.has(uuid)) {
+      stopScan();
+      void setBleScanning(uuid, null);
+    }
   }
 });

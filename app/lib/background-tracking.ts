@@ -12,7 +12,7 @@ import {
   GEOFENCE_RADIUS_M,
 } from "./constants";
 import { authLog, short } from "./auth-log";
-import { acquireWakeLock, releaseWakeLock } from "@/modules/activity-transition";
+import { acquireWakeLock, bgSleep, releaseWakeLock } from "@/modules/activity-transition";
 import { appendSystemLog } from "./system-log";
 import { IoTDevice } from "./types";
 
@@ -124,8 +124,9 @@ import { IoTDevice } from "./types";
 // ================================================================================
 const TRACKING_NOTIFICATION_ID = "geofence-tracking";
 
-// "fast" = ScanMode.LowLatency (진입 직후), "saving" = ScanMode.Balanced (그 이후)
-export type BleScanMode = "fast" | "saving";
+// "fast" = ScanMode.LowLatency (진입 직후), "saving" = ScanMode.Balanced (그 이후),
+// "paused" = 반경 안에서 정지 중이라 자동 해제 보류(걸으면 다시 검색)
+export type BleScanMode = "fast" | "saving" | "paused";
 
 // 감시 중인 기기 수와 BLE 스캔 상태를 한 알림에 함께 표시한다.
 // 백그라운드 태스크가 재시작되면 이 값들은 초기화되므로, 없을 때도 문구가 성립해야 한다.
@@ -140,15 +141,20 @@ const renderTrackingNotification = async (asForegroundService = false) => {
     name: "위치 트래킹",
     importance: AndroidImportance.LOW,
   });
-  const scanning = bleScanning.size;
-  const isFast = [...bleScanning.values()].includes("fast");
+  const modes = [...bleScanning.values()];
+  const scanning = modes.filter((m) => m !== "paused").length;
+  const paused = modes.length - scanning;
+  const isFast = modes.includes("fast");
   await notifee.displayNotification({
     id: TRACKING_NOTIFICATION_ID,
-    title: scanning > 0 ? "기기 검색 중" : "위치 트래킹 중",
+    title: scanning > 0 ? "기기 검색 중" : paused > 0 ? "자동 해제 대기 중" : "위치 트래킹 중",
     body:
       scanning > 0
-        ? `근처 기기 ${scanning}개를 ${isFast ? "빠른 검색" : "절전 검색"} 모드로 찾고 있습니다`
-        : watchedDeviceCount === null
+        ? `근처 기기 ${scanning}개를 ${isFast ? "빠른 검색" : "절전 검색"} 모드로 찾고 있습니다` +
+          (paused > 0 ? ` · ${paused}개는 정지 대기` : "")
+        : paused > 0
+          ? `반경 안에서 멈춰 있어 기기 ${paused}개의 자동 해제를 쉬는 중입니다. 걸으면 바로 검색합니다`
+          : watchedDeviceCount === null
           ? "등록된 기기의 주변 진입을 감시하고 있습니다"
           : `등록된 기기 ${watchedDeviceCount}개의 주변 진입을 감시하고 있습니다`,
     // 그룹을 따로 지정해야 Android 자동 묶음에 안 들어간다. 묶음에 ongoing 알림이 끼면
@@ -243,6 +249,10 @@ export const stopTrackingService = async () => {
   releaseService?.();
   releaseService = null;
   await notifee.stopForegroundService();
+  // notifee는 서비스를 비동기로 내리며 마지막에 같은 id의 알림을 지운다(stopForeground(true)).
+  // 바로 다시 그리면 그 뒤에 지워져 트래킹 알림이 사라지므로, 내려갈 시간을 두고 호출한 쪽이 다시 그린다.
+  // ponytail: 고정 대기 1초. 기기가 느려 그래도 지워지면 서비스 알림 id를 트래킹 알림과 분리한다
+  await bgSleep(1000);
   authLog("SERVICE", "포그라운드 서비스 + wakelock 종료");
 };
 
