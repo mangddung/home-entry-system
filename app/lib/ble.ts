@@ -252,6 +252,9 @@ export const scanDevice = async (
   });
 };
 
+// 마지막 연결 실패 사유. 자동 인증 로그의 "연결 실패" 줄에 붙인다
+let lastConnectError = "";
+
 // shouldAbort: 대기 중인 connect는 OS 타임아웃(약 30초)까지 안 끝나므로, true가 되면 직접 취소하고 재시도도 멈춘다
 export const connectDevice = async (
   device: Device,
@@ -277,6 +280,7 @@ export const connectDevice = async (
       break;
     } catch (e: any) {
       tryCount++;
+      lastConnectError = `${tryCount}회째 ${e.message}`;
       logDebug({ event_name, log_type: "WARNING", message: `실패 재시도(${tryCount}회): ${e.message}` });
     } finally {
       if (watch != null) clearBgTimeout(watch);
@@ -303,6 +307,7 @@ export const connectDevice = async (
     }
     return connected;
   } catch (e: any) {
+    lastConnectError = `서비스 탐색 실패: ${e.message}`;
     logDebug({ event_name, log_type: "WARNING", message: `서비스 탐색 실패: ${e.message}` });
     // 연결은 된 상태라 직접 끊는다(ESP는 연결 하나만 받으므로 남겨 두면 다음 시도에서 안 보인다)
     await connected.cancelConnection().catch(() => {});
@@ -524,9 +529,10 @@ export const userTokenExchange = async (ioTDevice: IoTDevice, opts?: ScanOptions
   if (!devices.length) return false;
   const tScan = Date.now();
   trace?.(`연결 시도 (RSSI ${devices[0].rssi ?? "?"}dBm)`);
+  lastConnectError = "";
   const connected = await connectDevice(devices[0]);
   if (!connected) {
-    trace?.(`연결 실패 (${Date.now() - tScan}ms)`);
+    trace?.(`연결 실패 (${Date.now() - tScan}ms): ${lastConnectError || "사유 없음"}`);
     return false;
   }
   const tConn = Date.now();
