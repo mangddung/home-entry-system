@@ -7,6 +7,7 @@ import { ScanMode } from "react-native-ble-plx";
 import { loadDevices, updateDeviceStatus } from "@/lib/api/devices";
 import {
   BG_GEOFENCE_TASK,
+  BG_LOCATION_TASK,
   DEVICE_STATUS_KEY,
 } from "@/lib/constants";
 import { isTokenAlive } from "@/lib/schedule";
@@ -330,6 +331,9 @@ ensureTaskDelivery();
 AppState.addEventListener("change", (state) => {
   if (state === "active") ensureTaskDelivery();
 });
+
+// 지오펜스 판정 가속용 위치 업데이트(background-tracking.ts startLocationPolling). 요청 자체가 목적이라 값은 쓰지 않는다
+TaskManager.defineTask(BG_LOCATION_TASK, async () => {});
 
 TaskManager.defineTask(BG_GEOFENCE_TASK, async ({ data, error }) => {
   if (error) {

@@ -4,6 +4,7 @@
 import notifee, { AndroidForegroundServiceType, AndroidImportance } from "@notifee/react-native";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
+import { AppState } from "react-native";
 import { loadDevices } from "./api/devices";
 import {
   BG_GEOFENCE_TASK,
@@ -162,6 +163,44 @@ const renderTrackingNotification = async (asForegroundService = false) => {
   });
 };
 
+// 지오펜스 판정 가속: Play 서비스는 다른 위치 요청이 없으면 우리 지오펜스를 5분 주기로만 판정한다
+// (실측: 960m 밖으로 옮겨도 3분 넘게 이탈 미전달). 지오펜스가 있는 동안 저전력(Wi-Fi·기지국) 위치를 30초마다
+// 요청해 그 위치로 바로 판정하게 한다. watchPositionAsync는 앱이 백그라운드로 가면 expo가 멈추므로(onHostPause)
+// 백그라운드용인 위치 업데이트 태스크(expo 자체 포그라운드 서비스)를 쓴다. 받은 위치는 쓰지 않는다(tasks/bg-location.ts).
+// ponytail: 30초 Balanced 상시 요청이라 배터리를 더 쓴다. 줄이려면 LOCATION_POLL_MS를 늘린다.
+const LOCATION_POLL_MS = 30 * 1000;
+// expo는 받은 위치마다 JobScheduler 작업을 하나씩 만들고, 지오펜스 이벤트도 같은 앱 할당량의 작업으로 전달한다.
+// Android 16은 포그라운드 서비스와 같이 도는 작업에도 할당량을 적용한다(실측 S24 Ultra: 배터리 최적화 예외 앱도
+// 40분에 75개). 위치 작업이 이를 다 쓰면 지오펜스 작업이 WITHIN_QUOTA 미충족으로 밀려 앱을 열 때까지 전달되지 않았다.
+// 값은 어차피 안 쓰므로 10분에 한 번만 묶어 넘기게 한다(위치 요청 주기는 그대로 30초).
+const LOCATION_REPORT_MS = 10 * 60 * 1000;
+let pollingEnsured = false; // 이 프로세스에서 포그라운드 서비스까지 올렸는지
+
+const startLocationPolling = async () => {
+  try {
+    // 프로세스가 다시 뜨면 expo는 위치 등록만 복원하고 포그라운드 서비스는 올리지 않는다(실측: 서비스 없이 캐시 상태로
+    // 내려감). 서비스는 앱이 화면에 있을 때만 시작할 수 있으므로, 화면에 있으면 이미 등록돼 있어도 프로세스당 한 번
+    // 다시 등록해 올린다. 백그라운드에서는 등록이 없을 때만 건다.
+    const foreground = AppState.currentState === "active";
+    if (pollingEnsured || (!foreground && (await Location.hasStartedLocationUpdatesAsync(BG_LOCATION_TASK)))) return;
+    await Location.startLocationUpdatesAsync(BG_LOCATION_TASK, {
+      accuracy: Location.Accuracy.Balanced,
+      timeInterval: LOCATION_POLL_MS,
+      distanceInterval: 0,
+      deferredUpdatesInterval: LOCATION_REPORT_MS,
+      foregroundService: {
+        notificationTitle: "자동 인증 대기 중",
+        notificationBody: "등록된 기기 주변 진입을 빠르게 감지하기 위해 위치를 확인하고 있습니다",
+        killServiceOnDestroy: false,
+      },
+    });
+    pollingEnsured = foreground;
+    authLog("SERVICE", `위치 ${LOCATION_POLL_MS / 1000}초 간격 요청 시작 (지오펜스 판정 가속)`);
+  } catch (e) {
+    authLog("ERROR", `위치 요청 시작 실패(지오펜스 판정이 느려질 수 있음): ${e}`);
+  }
+};
+
 // BLE 트래킹 루프가 도는 동안 트래킹 알림을 포그라운드 서비스로 올린다.
 // Android 9+는 서비스 없는 백그라운드 앱에 센서(걸음) 이벤트를 주지 않는다.
 // Android 12+ 백그라운드 시작 제한의 예외는 지오펜스 이벤트 직후뿐이라 서비스는 루프 시작 때 한 번만 올리고,
@@ -210,6 +249,7 @@ export const stopTrackingService = async () => {
 const showTrackingNotification = async (count: number) => {
   watchedDeviceCount = count;
   await renderTrackingNotification();
+  await startLocationPolling();
 };
 
 // BLE 스캔 상태를 알림에 반영. 스캔 모드가 바뀌는 순간에만 호출되므로 갱신 비용은 무시할 수준이다.
@@ -223,6 +263,12 @@ export const setBleScanning = async (uuid: string, mode: BleScanMode | null) => 
 export const cancelTrackingNotification = async () => {
   bleScanning.clear();
   watchedDeviceCount = null;
+  pollingEnsured = false;
+  try {
+    if (await Location.hasStartedLocationUpdatesAsync(BG_LOCATION_TASK)) await Location.stopLocationUpdatesAsync(BG_LOCATION_TASK);
+  } catch {
+    // 등록돼 있지 않으면 무시
+  }
   await notifee.cancelNotification(TRACKING_NOTIFICATION_ID);
 };
 
@@ -249,7 +295,11 @@ export const updateGeoFence = async () => {
   }));
 
   const signature = JSON.stringify(geoFences);
-  if (signature === lastGeoFenceSignature) return;
+  if (signature === lastGeoFenceSignature) {
+    // 등록은 그대로여도 알림이 지워졌거나 위치 요청이 멈췄을 수 있다. 앱 실행·홈 갱신·푸시 때 다시 맞춘다
+    if (geoFences.length > 0) await showTrackingNotification(geoFences.length);
+    return;
+  }
 
   const isGeofenceRunning = await TaskManager.isTaskRegisteredAsync(BG_GEOFENCE_TASK);
   if (isGeofenceRunning) {
