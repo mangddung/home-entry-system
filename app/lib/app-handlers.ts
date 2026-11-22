@@ -64,11 +64,12 @@ const logAuthResultPush = (remoteMessage: FirebaseMessagingTypes.RemoteMessage) 
 // 포그라운드·백그라운드 공통 푸시 처리. 내 자동 해제의 성공 푸시면 피드백 버튼을 단다.
 export const handlePush = async (remoteMessage: FirebaseMessagingTypes.RemoteMessage) => {
   logAuthResultPush(remoteMessage);
+  // 서버는 제목·본문을 data로 보낸다(fcm_utils.py, 시스템이 따로 띄워 알림이 두 번 뜨지 않게). 옛 서버의 notification도 읽는다
+  const title = remoteMessage.notification?.title ?? (remoteMessage.data?.title as string | undefined);
+  const rawBody = remoteMessage.notification?.body ?? (remoteMessage.data?.body as string | undefined);
   const feedbackId = await createFeedbackFromPush(remoteMessage.data);
-  const body = feedbackId
-    ? `${remoteMessage.notification?.body ?? ""} · 열리는 타이밍은 어땠나요?`
-    : remoteMessage.notification?.body;
-  await appendFcmNotification(remoteMessage.notification?.title, body, feedbackId ?? undefined);
+  const body = feedbackId ? `${rawBody ?? ""} · 열리는 타이밍은 어땠나요?` : rawBody;
+  await appendFcmNotification(title, body, feedbackId ?? undefined);
   await refreshDevicesFromPush(remoteMessage.data);
   const channelId = await notifee.createChannel({
     id: "default",
@@ -76,7 +77,7 @@ export const handlePush = async (remoteMessage: FirebaseMessagingTypes.RemoteMes
     importance: AndroidImportance.HIGH,
   });
   await notifee.displayNotification({
-    title: remoteMessage.notification?.title,
+    title,
     body,
     data: feedbackId ? { ...remoteMessage.data, feedback_id: feedbackId } : remoteMessage.data,
     android: {

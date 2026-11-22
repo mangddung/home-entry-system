@@ -15,9 +15,13 @@ def send_to_user(user_uuid: str, title: str, body: str, data: dict | None = None
             return
 
     try:
+        # notification을 싣지 않는다. 실으면 앱이 백그라운드일 때 시스템이 알림을 직접 띄우고 앱 핸들러도
+        # (피드백 버튼을 단) 알림을 띄워 두 번 뜬다. 제목·본문은 data로 보내고 앱(notifee)이 한 번만 띄운다.
+        # data 전용 메시지는 기본 우선순위가 normal이라 Doze에서 늦게 오므로 high로 보낸다.
+        # ponytail: iOS는 data 전용이면 표시되지 않는다(apns content-available 필요). iOS 배포 때 추가.
         messaging.send(messaging.Message(
-            notification=messaging.Notification(title=title, body=body),
-            data=data,
+            data={**(data or {}), "title": title, "body": body},
+            android=messaging.AndroidConfig(priority="high"),
             token=user.fcm_token,
         ))
     except Exception as e:
