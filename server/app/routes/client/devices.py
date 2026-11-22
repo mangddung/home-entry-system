@@ -66,12 +66,15 @@ def _get_or_create_token(session, user_uuid: str, device_uuid: str, role: str) -
         session.add(token)
         log_activity("member_token_generated", user_uuid=user_uuid, device_uuid=device_uuid, session=session)
 
+    # 방금 만든 토큰은 시각이 tz-aware라 isoformat에 +00:00이 붙는다. 그대로 Z를 붙이면 "+00:00Z"가 되어
+    # 앱이 날짜로 못 읽고 토큰을 무효로 본다. DB에서 읽은 값(naive UTC)과 같은 형식으로 맞춘다.
+    iso = lambda dt: dt.replace(tzinfo=None).isoformat() + "Z" if dt else None
     return {
         "token_value": token.token_value,
         "max_uses":    token.max_uses,
         "use_count":   token.use_count,
-        "not_before":  token.not_before.isoformat() + "Z" if token.not_before else None,
-        "expired_at":  token.expired_at.isoformat() + "Z" if token.expired_at else None,
+        "not_before":  iso(token.not_before),
+        "expired_at":  iso(token.expired_at),
         # 게스트 앱이 시간대 밖에서 BLE 스캔을 쉬도록 규칙을 함께 내려준다(판정은 서버가 최종).
         "schedule":    json.loads(token.schedule_json) if token.schedule_json else None,
         "schedule_tz": token.schedule_tz,
