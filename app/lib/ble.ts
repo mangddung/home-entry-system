@@ -4,6 +4,7 @@ import { commitBond, dropPendingBond, hasBond, markPendingBond, resetBond, unbon
 import { DEBUG_LOG, USER_SECRET_KEY } from "@/lib/constants";
 import { hmacSha256, sha256 } from "@/lib/crypto";
 import { createGate } from "@/lib/proximity-rules";
+import { bgSleep, clearBgTimeout, setBgTimeout } from "@/modules/activity-transition";
 import { appendSystemLog, formatTimestamp } from "@/lib/system-log";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Buffer } from "buffer";
@@ -30,18 +31,18 @@ const POWER_ON_TIMEOUT_MS = 10000;
 const waitForPoweredOn = (manager: BleManager): Promise<void> =>
   new Promise((resolve, reject) => {
     let last = "Unknown";
-    const timer = setTimeout(() => {
+    const timer = setBgTimeout(() => {
       sub.remove();
       reject(new Error(`BLE 상태: ${last} (${POWER_ON_TIMEOUT_MS / 1000}초 동안 켜지지 않음)`));
     }, POWER_ON_TIMEOUT_MS);
     const sub = manager.onStateChange((state) => {
       last = state;
       if (state === "PoweredOn") {
-        clearTimeout(timer);
+        clearBgTimeout(timer);
         sub.remove();
         resolve();
       } else if (state === "PoweredOff" || state === "Unsupported") {
-        clearTimeout(timer);
+        clearBgTimeout(timer);
         sub.remove();
         reject(new Error(`BLE 상태: ${state}`));
       }
@@ -179,7 +180,7 @@ export const scanDevice = async (
     const finish = (result: Device[], reason: string) => {
       if (done) return;
       done = true;
-      clearTimeout(scanTimeout);
+      clearBgTimeout(scanTimeout);
       manager.stopDeviceScan();
       isScanning = false;
       if (finishActiveScan === stopThis) finishActiveScan = null;
@@ -192,7 +193,7 @@ export const scanDevice = async (
     const stopThis = () => finish(gate ? [] : [...found.values()], "중지 요청");
     finishActiveScan = stopThis;
 
-    const scanTimeout = setTimeout(() => {
+    const scanTimeout = setBgTimeout(() => {
       logDebug({
         event_name: event_name,
         log_type: "DEBUG",
@@ -261,11 +262,16 @@ export const connectDevice = async (
   let connected: Device | null = null;
   let aborted = false;
   while (tryCount < 5 && !aborted) {
-    const watch = shouldAbort && setInterval(() => {
-      if (!shouldAbort()) return;
-      aborted = true;
-      manager.cancelDeviceConnection(device.id).catch(() => {});
-    }, 500);
+    // 0.5초마다 중단 요청을 확인한다(setInterval 대신 백그라운드 타이머를 이어 건다)
+    let watch: number | null = null;
+    const poll = () => {
+      watch = setBgTimeout(() => {
+        if (!shouldAbort?.()) return poll();
+        aborted = true;
+        manager.cancelDeviceConnection(device.id).catch(() => {});
+      }, 500);
+    };
+    if (shouldAbort) poll();
     try {
       connected = await device.connect(options);
       break;
@@ -273,13 +279,13 @@ export const connectDevice = async (
       tryCount++;
       logDebug({ event_name, log_type: "WARNING", message: `실패 재시도(${tryCount}회): ${e.message}` });
     } finally {
-      if (watch) clearInterval(watch);
+      if (watch != null) clearBgTimeout(watch);
     }
   }
 
   if (!connected) return null;
 
-  await new Promise((r) => setTimeout(r, 600));
+  await bgSleep(600);
 
   try { await connected.requestMTU(512); } catch {}
 
@@ -335,10 +341,10 @@ export const receiveData = (
     const finish = (nonce: string | null) => {
       if (done) return;
       done = true;
-      clearTimeout(timer);
+      clearBgTimeout(timer);
       resolve(nonce);
     };
-    const timer = setTimeout(() => {
+    const timer = setBgTimeout(() => {
       logDebug({ event_name: event_name, log_type: "WARNING", message: "nonce 수신 시간 초과" });
       finish(null);
     }, timeoutMs);

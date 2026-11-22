@@ -13,7 +13,14 @@ import { isTokenAlive } from "@/lib/schedule";
 import { appendSystemLog } from "@/lib/system-log";
 import { getTokenSecure } from "@/lib/token-storage";
 import { DeviceStatus, IoTDevice } from "@/lib/types";
-import { getLastStepAt, startStepWatch, stopStepWatch } from "@/modules/activity-transition";
+import {
+  bgSleep,
+  clearBgTimeout,
+  getLastStepAt,
+  setBgTimeout,
+  startStepWatch,
+  stopStepWatch,
+} from "@/modules/activity-transition";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
 
@@ -34,7 +41,7 @@ const BLE_PROMOTE_MS = 45 * 1000;
 const STILL_DENY_MS = 5 * 60 * 1000;
 
 const bleInProgress = new Set<string>();
-const bleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const bleTimers = new Map<string, number>();
 const bleAbort = new Set<string>();
 const bleStopReason = new Map<string, string>(); // 자동 인증 로그용 중단 사유
 
@@ -121,7 +128,7 @@ const stopBleTracking = (uuid: string, reason: string) => {
   if (!bleStopReason.has(uuid)) bleStopReason.set(uuid, reason);
   bleAbort.add(uuid);
   const timer = bleTimers.get(uuid);
-  if (timer) clearTimeout(timer);
+  if (timer) clearBgTimeout(timer);
   bleTimers.delete(uuid);
 };
 
@@ -139,7 +146,7 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
     // 루프의 while 확인부터 finally의 bleInProgress.delete까지는 await가 없어 여기서 풀면 루프가 반드시 계속 돈다.
     bleAbort.delete(uuid);
     bleStopReason.delete(uuid);
-    bleTimers.set(uuid, setTimeout(() => stopBleTracking(uuid, `${BLE_MAX_TRACKING_MS / 60000}분 상한`), BLE_MAX_TRACKING_MS));
+    bleTimers.set(uuid, setBgTimeout(() => stopBleTracking(uuid, `${BLE_MAX_TRACKING_MS / 60000}분 상한`), BLE_MAX_TRACKING_MS));
     appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble tracking resumed (re-enter before stop)" });
     authLog("BLE", `${dev} 이탈 직후 재진입 → 기존 추적 루프 이어서 사용`);
     return;
@@ -147,10 +154,10 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
   bleInProgress.add(uuid);
   bleAbort.delete(uuid);
   bleStopReason.delete(uuid);
-  bleTimers.set(uuid, setTimeout(() => stopBleTracking(uuid, `${BLE_MAX_TRACKING_MS / 60000}분 상한`), BLE_MAX_TRACKING_MS));
+  bleTimers.set(uuid, setBgTimeout(() => stopBleTracking(uuid, `${BLE_MAX_TRACKING_MS / 60000}분 상한`), BLE_MAX_TRACKING_MS));
 
   appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble tracking start (geofence enter)" });
-  // 백그라운드에서 JS 타이머가 멈추지 않게 루프가 도는 동안 포그라운드 서비스를 유지한다(background-tracking.ts 참고).
+  // 루프가 도는 동안 포그라운드 서비스와 wakelock을 유지한다(background-tracking.ts 참고).
   // 지오펜스 이벤트 직후라 백그라운드 시작 제한의 예외에 걸린다. 실패해도 루프는 기존처럼 돈다.
   try {
     await startTrackingService();
@@ -216,7 +223,7 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
         lastBurst = null;
       }
       if (denied) {
-        await new Promise((resolve) => setTimeout(resolve, BLE_RETRY_INTERVAL_MS));
+        await bgSleep(BLE_RETRY_INTERVAL_MS);
         continue;
       }
 
@@ -294,7 +301,7 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
         break;
       }
       if (bleAbort.has(uuid)) break;
-      await new Promise((resolve) => setTimeout(resolve, BLE_RETRY_INTERVAL_MS));
+      await bgSleep(BLE_RETRY_INTERVAL_MS);
     }
     if (bleAbort.has(uuid)) {
       appendSystemLog({ event_name: uuid, log_type: "INFO", message: "ble tracking stopped (timeout or exit)" });

@@ -7,6 +7,7 @@ import android.hardware.SensorEventListener2
 import android.hardware.SensorManager
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.Exceptions
@@ -28,6 +29,19 @@ class ActivityTransitionModule : Module() {
   @Volatile private var watch: SensorEventListener2? = null
   // 이번 감시에서 받은 마지막 걸음 시각(epoch ms). 아직 센서 응답이 없으면 null
   @Volatile private var lastStepAt: Long? = null
+  // 추적 루프용 partial wakelock. 포그라운드 서비스만으로는 화면이 꺼지면 CPU가 잠들어 JS 타이머가 멈춘다
+  // (실측: 60초 스캔 타임아웃이 33분 뒤에 발화). 배터리 최적화 예외 앱이라 Doze 중에도 유지된다.
+  private var wakeLock: PowerManager.WakeLock? = null
+
+  private fun releaseWakeLock() {
+    wakeLock?.takeIf { it.isHeld }?.release()
+  }
+
+  // JS setTimeout 대체(추적 루프·BLE 대기용). 앱을 열었다가 백그라운드로 보낸 뒤에는 포그라운드 서비스가 떠 있어도
+  // RN 타이머가 깨어나지 않았다(실측: 5초 대기가 11분간 미발화, 그동안 네이티브 이벤트·Promise는 정상 처리).
+  // 메인 Handler로 재고 Promise로 깨운다. 화면이 꺼져도 돌도록 추적 중에는 위 wakelock을 함께 잡는다.
+  // 메인 큐에서만 접근한다
+  private val delays = HashMap<Int, Pair<Runnable, Promise>>()
 
   private val sensorManager: SensorManager?
     get() = appContext.reactContext?.getSystemService(Context.SENSOR_SERVICE) as SensorManager?
@@ -98,6 +112,40 @@ class ActivityTransitionModule : Module() {
 
     AsyncFunction("stopStepWatch") { stopWatch() }.runOnQueue(Queues.MAIN)
 
-    OnDestroy { stopWatch() }
+    // 이미 잡고 있으면 만료 시각만 다시 정한다(참조 카운트 없음). 만료는 JS가 해제를 못 했을 때의 안전장치
+    Function("acquireWakeLock") { timeoutMs: Double ->
+      val context = appContext.reactContext ?: throw Exceptions.ReactContextLost()
+      val lock = wakeLock ?: (context.getSystemService(Context.POWER_SERVICE) as PowerManager)
+        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "iotapp:ble-tracking")
+        .apply { setReferenceCounted(false) }
+        .also { wakeLock = it }
+      lock.acquire(timeoutMs.toLong())
+    }
+
+    Function("releaseWakeLock") { releaseWakeLock() }
+
+    // ms 뒤 true로 끝난다. cancelDelay로 취소하면 false로 끝난다
+    AsyncFunction("delay") { id: Int, ms: Double, promise: Promise ->
+      val run = Runnable {
+        delays.remove(id)
+        promise.resolve(true)
+      }
+      delays[id] = run to promise
+      handler.postDelayed(run, ms.toLong())
+    }.runOnQueue(Queues.MAIN)
+
+    AsyncFunction("cancelDelay") { id: Int ->
+      delays.remove(id)?.let { (run, promise) ->
+        handler.removeCallbacks(run)
+        promise.resolve(false)
+      }
+    }.runOnQueue(Queues.MAIN)
+
+    OnDestroy {
+      stopWatch()
+      releaseWakeLock()
+      delays.values.forEach { handler.removeCallbacks(it.first) }
+      delays.clear()
+    }
   }
 }

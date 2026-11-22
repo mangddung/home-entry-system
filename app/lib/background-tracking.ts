@@ -11,6 +11,7 @@ import {
   GEOFENCE_RADIUS_M,
 } from "./constants";
 import { authLog, short } from "./auth-log";
+import { acquireWakeLock, releaseWakeLock } from "@/modules/activity-transition";
 import { appendSystemLog } from "./system-log";
 import { IoTDevice } from "./types";
 
@@ -162,15 +163,21 @@ const renderTrackingNotification = async (asForegroundService = false) => {
 };
 
 // BLE 트래킹 루프가 도는 동안 트래킹 알림을 포그라운드 서비스로 올린다.
-// 백그라운드에서는 RN이 JS 타이머(setTimeout)를 멈춰 스캔 타임아웃·재시도 대기·연결 후 대기에서 루프가 멈춘다.
-// notifee 포그라운드 서비스는 Headless JS 태스크로 돌아 그동안은 타이머가 정상 동작한다.
+// Android 9+는 서비스 없는 백그라운드 앱에 센서(걸음) 이벤트를 주지 않는다.
 // Android 12+ 백그라운드 시작 제한의 예외는 지오펜스 이벤트 직후뿐이라 서비스는 루프 시작 때 한 번만 올리고,
 // 이후 문구 갱신은 같은 id의 일반 표시로 한다.
+// 서비스는 프로세스만 살려 둘 뿐 CPU를 깨워 두지 않는다. 화면이 꺼지면 CPU가 잠들어 타이머가 그대로 멈추므로
+// (실측: 60초 스캔 타임아웃이 33분 뒤 발화) 서비스가 떠 있는 동안 partial wakelock도 함께 잡는다.
+// 만료는 해제 누락 대비 안전장치. 루프 상한(60분)보다 조금 길게 둔다.
+// ponytail: 이탈 직후 재진입으로 루프가 60분 넘게 이어지면 그 뒤는 wakelock 없이 돈다(기존 동작과 같음)
+const WAKE_LOCK_TIMEOUT_MS = 65 * 60 * 1000;
 let serviceActive = false;
 let releaseService: (() => void) | null = null;
 notifee.registerForegroundService(
   () =>
     new Promise<void>((resolve) => {
+      // 진단: "시작" 줄은 JS가 요청한 기록일 뿐이다. 이 줄이 있어야 OS가 서비스를 실제로 띄운 것
+      authLog("SERVICE", `포그라운드 서비스 실제 기동 확인${serviceActive ? "" : " → 이미 종료 요청됨, 바로 내림"}`);
       if (!serviceActive) return resolve(); // 러너가 뜨기 전에 이미 멈췄으면 태스크를 바로 끝낸다
       releaseService = resolve;
     }),
@@ -181,7 +188,8 @@ export const startTrackingService = async () => {
   serviceActive = true;
   try {
     await renderTrackingNotification(true);
-    authLog("SERVICE", "포그라운드 서비스 시작 (백그라운드 타이머 유지)");
+    acquireWakeLock(WAKE_LOCK_TIMEOUT_MS);
+    authLog("SERVICE", "포그라운드 서비스 + wakelock 시작 (화면 꺼짐에도 타이머 유지)");
   } catch (e) {
     serviceActive = false;
     throw e;
@@ -192,10 +200,11 @@ export const startTrackingService = async () => {
 export const stopTrackingService = async () => {
   if (!serviceActive) return;
   serviceActive = false;
+  releaseWakeLock();
   releaseService?.();
   releaseService = null;
   await notifee.stopForegroundService();
-  authLog("SERVICE", "포그라운드 서비스 종료");
+  authLog("SERVICE", "포그라운드 서비스 + wakelock 종료");
 };
 
 const showTrackingNotification = async (count: number) => {
