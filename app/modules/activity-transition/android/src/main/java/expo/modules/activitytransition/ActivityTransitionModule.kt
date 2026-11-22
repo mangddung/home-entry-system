@@ -9,6 +9,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import expo.modules.apploader.AppLoaderProvider
+import expo.modules.interfaces.constants.ConstantsInterface
+import expo.modules.interfaces.taskManager.TaskManagerInterface
+import expo.modules.interfaces.taskManager.TaskServiceInterface
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.functions.Queues
@@ -139,6 +143,30 @@ class ActivityTransitionModule : Module() {
         handler.removeCallbacks(run)
         promise.resolve(false)
       }
+    }.runOnQueue(Queues.MAIN)
+
+    // expo-task-manager(New Architecture) 버그 우회. 프로세스가 뜨자마자(React 준비 전) 태스크 이벤트가 오면 expo는 앱을
+    // "헤드리스로 띄운 것"으로 기록하고, 첫 이벤트들이 끝난 2초 뒤 그 기록과 함께 JS 쪽 수신 등록(TaskManager)까지 지운다.
+    // 화면이 붙어 있어 런타임은 살아 있는데 등록만 사라져, 이후 지오펜스·위치 이벤트가 전부 메모리에 쌓였다가
+    // 앱을 다시 시작해야 한꺼번에 들어왔다(실측 S24 Ultra: JS 새로고침 한 번에 밀린 87건이 2초 안에 전달).
+    // 화면(Activity)이 있으면 헤드리스 기록을 지우고 일반 등록으로 다시 넣는다. 다시 넣을 때 밀린 이벤트도 전달된다.
+    // 화면이 없으면(진짜 헤드리스 실행) expo 흐름에 맡긴다. 그 상태에서 invalidateApp은 런타임을 내린다.
+    AsyncFunction("ensureTaskDelivery") {
+      val context = appContext.reactContext ?: return@AsyncFunction false
+      appContext.currentActivity ?: return@AsyncFunction false
+      val taskManager = appContext.legacyModule<TaskManagerInterface>() ?: return@AsyncFunction false
+      val appScopeKey = taskManager.appScopeKey ?: return@AsyncFunction false
+      val taskService = appContext.legacyModuleRegistry
+        .getSingletonModule("TaskService", TaskServiceInterface::class.java) ?: return@AsyncFunction false
+      AppLoaderProvider.getLoader("react-native-headless", context)?.let {
+        if (it.isRunning(appScopeKey)) it.invalidateApp(appScopeKey)
+      }
+      // TaskManagerInternalModule.getAppUrl()과 같은 값
+      val appUrl = appContext.legacyModule<ConstantsInterface>()?.constants?.get("experienceUrl") as? String
+        ?: context.packageName
+      // invalidateApp은 기록 삭제를 메인 큐에 올려 둔다. 그 뒤에 돌도록 등록도 큐에 올린다
+      handler.post { taskService.setTaskManager(taskManager, appScopeKey, appUrl) }
+      true
     }.runOnQueue(Queues.MAIN)
 
     OnDestroy {

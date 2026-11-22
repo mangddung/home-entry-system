@@ -16,6 +16,7 @@ import { DeviceStatus, IoTDevice } from "@/lib/types";
 import {
   bgSleep,
   clearBgTimeout,
+  ensureTaskDelivery,
   getLastStepAt,
   setBgTimeout,
   startStepWatch,
@@ -23,6 +24,7 @@ import {
 } from "@/modules/activity-transition";
 import * as Location from "expo-location";
 import * as TaskManager from "expo-task-manager";
+import { AppState } from "react-native";
 
 // geofence 진입 직후에는 문으로 이동 중일 확률이 높아 고반응 스캔,
 // 그 뒤로는 저전력 스캔으로 내려 exit까지 계속 감시한다.
@@ -321,6 +323,13 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
     void setBleScanning(uuid, null);
   }
 };
+
+// expo-task-manager가 앱 실행 중에 태스크 수신 등록을 지워 아래 태스크들이 앱을 다시 시작할 때까지 호출되지 않던 문제의
+// 우회(modules/activity-transition ensureTaskDelivery). JS가 뜰 때와 화면으로 돌아올 때마다 등록을 되살린다.
+ensureTaskDelivery();
+AppState.addEventListener("change", (state) => {
+  if (state === "active") ensureTaskDelivery();
+});
 
 TaskManager.defineTask(BG_GEOFENCE_TASK, async ({ data, error }) => {
   if (error) {

@@ -10,6 +10,7 @@ const native = requireOptionalNativeModule<{
   stopStepWatch(): Promise<void>;
   acquireWakeLock(timeoutMs: number): void;
   releaseWakeLock(): void;
+  ensureTaskDelivery?(): Promise<boolean>;
   delay(id: number, ms: number): Promise<boolean>;
   cancelDelay(id: number): Promise<void>;
 }>("ActivityTransition");
@@ -49,3 +50,9 @@ export const clearBgTimeout = (id: number) => {
   else void native.cancelDelay(id);
 };
 export const bgSleep = (ms: number) => new Promise<void>((resolve) => setBgTimeout(resolve, ms));
+
+// expo-task-manager가 지운 태스크 수신 등록을 되살린다(이유는 네이티브 쪽 주석). 앱이 화면에 있을 때만 동작한다.
+// 이 함수가 없는 예전 네이티브 빌드에서는 아무 일도 하지 않는다.
+export const ensureTaskDelivery = () => {
+  native?.ensureTaskDelivery?.().catch(() => {});
+};
