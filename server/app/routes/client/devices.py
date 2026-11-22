@@ -42,6 +42,14 @@ def _get_or_create_token(session, user_uuid: str, device_uuid: str, role: str) -
         .first()
     )
 
+    # 마스터·멤버의 5회 한도는 폰이 오프라인일 때를 대비한 것이다. 이 조회가 됐다는 건 서버와 통신이 되는 것이므로
+    # 한 번이라도 쓴 토큰은 새 토큰으로 바꿔 오프라인에서 쓸 수 있는 횟수를 늘 가득 채워 둔다.
+    # 인증 성공 푸시(refresh_devices)로 앱이 곧바로 이 목록을 다시 받으므로 온라인이면 쓰자마자 채워진다.
+    # 게스트 토큰은 마스터가 정한 횟수라 바꾸지 않는다.
+    if token is not None and role != "guest" and token.use_count > 0:
+        token.is_revoked = True
+        token = None
+
     if token is None:
         if role == "guest":
             return None
