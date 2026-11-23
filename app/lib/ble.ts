@@ -691,12 +691,13 @@ export const openServoSession = async (
     let nonce = await inbox.waitFor(NONCE_PATTERN, NONCE_TIMEOUT_MS);
     if (!nonce) return { type: "failed", message: CONNECT_FAILED_MESSAGE };
 
-    // 읽기 응답이 오면 저장된 본딩으로 암호화가 끝난 것이다. 실패하면 기기 쪽에 키가 없는 경우로 보고 본딩을 지운다.
-    // 일시적인 끊김이어도 재연결 한 번으로 복구되고, 문 열기는 본딩 없이도 동작한다.
+    // 읽기 응답이 오면 저장된 본딩으로 암호화가 끝난 것이다. 연결된 채 실패하면 기기 쪽에 키가 없는 경우로 보고 본딩을 지운다.
+    // 끊겨서 실패한 것(리셋·범위 이탈)은 키 문제가 아니다. 지우면 멀쩡한 본딩을 다시 맺어야 하므로 연결 실패로만 돌려준다.
     try {
       await connected.readCharacteristicForService(ioTDevice.ble_uuids.ble_service_uuid, SERVO_LIVE_CHR_UUID);
     } catch (e) {
       logDebug({ event_name, log_type: "WARNING", message: `서보 세션 암호화 실패: ${e}` });
+      if (!(await connected.isConnected().catch(() => false))) return { type: "failed", message: CONNECT_FAILED_MESSAGE };
       await unbondDevice(ioTDevice.device_uuid);
       return { type: "need_bond", message: NEED_BOND_MESSAGE };
     }
