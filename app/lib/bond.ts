@@ -39,6 +39,13 @@ const remove = (mac: string) => BleBond!.removeBond(mac).catch(() => false);
 export const resetBond = async (mac: string) => {
   if (!supported) return;
   await remove(mac);
+  // removeBond()는 해제를 요청만 하고 바로 돌아온다. 끝나기 전에 연결하면 폰이 옛 키로 암호화를 시도해
+  // 연결이 끊기거나, 재본딩에서 새 페어링 없이 옛 키로 암호화돼 기기가 BOND_OK를 보내지 않는다.
+  for (let i = 0; i < 10; i++) {
+    const bonded = await BleBond!.bondedDevices().catch(() => []);
+    if (!bonded.some((b) => b.address === mac)) return;
+    await new Promise((r) => setTimeout(r, 300));
+  }
 };
 
 /** 셋업 중 연결한 기기의 mac 기록 (등록 완료 전 중단되면 본딩 제거 대상) */
