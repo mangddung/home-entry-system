@@ -1,6 +1,10 @@
 # ESP32-C6 DevKitC-1 doorlock firmware defaults (두 모델 공통)
 # 모델별 값은 sdkconfig.defaults.wifi / sdkconfig.defaults.zigbee (gen_config가 함께 지정)
 
+# 빌드 대상 칩. sdkconfig.<model>은 git 제외라 새로 받은 PC에는 없다. 그때 여기 값이 없으면
+# 기본 대상(esp32, xtensa)으로 잡혀 C6(RISC-V) 툴체인 대신 xtensa 컴파일러를 찾다 실패한다.
+CONFIG_IDF_TARGET="esp32c6"
+
 # BLE / NimBLE
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
