@@ -3,7 +3,7 @@ import { Colors } from "@/constants/theme";
 import { useColorScheme } from "@/hooks/use-color-scheme";
 import { fetchDevices, loadDevices } from "@/lib/api/devices";
 import { fetchDeviceLogs, type DeviceLog } from "@/lib/api/logs";
-import { userTokenExchange } from "@/lib/ble";
+import { AUTH_OUTCOME_MESSAGE, userTokenExchange } from "@/lib/ble";
 import { loadCalibrations, noteManualUnlock } from "@/lib/proximity";
 import { effectiveThreshold, type Calibration } from "@/lib/proximity-rules";
 import {
@@ -464,12 +464,8 @@ export default function DeviceInfoView() {
     // 자동 해제를 기다리다 직접 연 경우면 "늦음" 피드백으로 반영
     void noteManualUnlock(device);
     try {
-      const success = await userTokenExchange(device);
-      if (success) {
-        showAlert("수동 인증", "인증 요청을 보냈습니다.");
-      } else {
-        showAlert("오류", "기기에 연결할 수 없습니다. 기기가 오프라인 상태이거나 범위 밖에 있는지 확인하세요.");
-      }
+      const { title, message } = AUTH_OUTCOME_MESSAGE[await userTokenExchange(device)];
+      showAlert(title, message);
     } catch {
       showAlert("오류", "인증 중 오류가 발생했습니다.");
     } finally {

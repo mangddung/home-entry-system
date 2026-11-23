@@ -400,7 +400,6 @@ export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, no
       bleUuids.ble_write_uuid as string,
       encodedData,
     );
-    await connected.cancelConnection();
     logDebug({
       event_name: event_name,
       log_type: "DEBUG",
@@ -410,15 +409,6 @@ export const sendUserAuthToken = async (connected: any, ioTDevice: IoTDevice, no
       event_name: event_name,
       log_type: "DEBUG",
       message: `전송 완료: ${encodedData}`,
-    });
-    // 검증 완료 response 추가 예정
-
-    // device status 변경. 다른 기기 기록은 건드리지 않는다(이탈 시 각자 초기화된다).
-    // 겹친 지오펜스에서 먼저 연 기기의 성공 기록을 지우면 재등록 시 initial Enter로 그 기기가 다시 열린다.
-    await updateDeviceStatus((list) => {
-      const status = list.find((s) => s.device_uuid === ioTDevice.device_uuid);
-      if (status) status.bleSuccess = true;
-      return list;
     });
     return true;
   } catch (e: any) {
@@ -522,38 +512,70 @@ const writeSetupPayload = async (connected: any, ioTDevice: IoTDevice, payload: 
   }
 };
 
-export const userTokenExchange = async (ioTDevice: IoTDevice, opts?: ScanOptions): Promise<boolean> => {
+// 기기가 서버 검증 결과로 보내는 알림. esp32/main/ble_server.h ble_server_auth_result와 짝
+const AUTH_RESULT_PATTERN = /^AUTH_(OK|DENY|NET_FAIL)$/;
+// 펌웨어 최악: HTTP 10초 × 2회 + 그 사이 재인증 요청
+const AUTH_RESULT_TIMEOUT_MS = 35000;
+
+// ok: 문 열림 / denied: 서버가 거부(다시 해도 같음) / server_fail: 기기가 서버에 닿지 못함 / failed: 기기와 통신 실패
+export type AuthOutcome = "ok" | "denied" | "server_fail" | "failed";
+
+export const AUTH_OUTCOME_MESSAGE: Record<AuthOutcome, { title: string; message: string }> = {
+  ok: { title: "수동 인증", message: "문이 열렸습니다." },
+  denied: { title: "인증 거부", message: "기기가 인증을 거부했습니다. 출입 토큰 상태를 확인하세요." },
+  server_fail: { title: "오류", message: "기기가 서버에 연결하지 못했습니다. 잠시 후 다시 시도하세요." },
+  failed: { title: "오류", message: "기기에 연결할 수 없습니다. 기기가 오프라인 상태이거나 범위 밖에 있는지 확인하세요." },
+};
+
+export const userTokenExchange = async (ioTDevice: IoTDevice, opts?: ScanOptions): Promise<AuthOutcome> => {
   const trace = opts?.trace;
   const t0 = Date.now();
   const devices = await scanDevice(ioTDevice, undefined, opts);
-  if (!devices.length) return false;
+  if (!devices.length) return "failed";
   const tScan = Date.now();
   trace?.(`연결 시도 (RSSI ${devices[0].rssi ?? "?"}dBm)`);
   lastConnectError = "";
   const connected = await connectDevice(devices[0]);
   if (!connected) {
     trace?.(`연결 실패 (${Date.now() - tScan}ms): ${lastConnectError || "사유 없음"}`);
-    return false;
+    return "failed";
   }
   const tConn = Date.now();
-  let sent = false;
+  // nonce와 검증 결과 두 번 알림을 받으므로 1회용 receiveData 대신 수신함을 쓴다
+  const inbox = openInbox(connected, ioTDevice);
   try {
-    const nonce = await receiveData(connected, ioTDevice);
+    const nonce = await inbox.waitFor(NONCE_PATTERN, NONCE_TIMEOUT_MS);
     if (nonce == null) {
       trace?.(`nonce 수신 실패 또는 ${NONCE_TIMEOUT_MS / 1000}초 초과 (연결 ${tConn - tScan}ms)`);
-      return false;
+      return "failed";
     }
     const tNonce = Date.now();
-    sent = await sendUserAuthToken(connected, ioTDevice, nonce);
+    if (!(await sendUserAuthToken(connected, ioTDevice, nonce))) {
+      trace?.("응답값 전송 실패");
+      return "failed";
+    }
+    const tSent = Date.now();
+    const result = await inbox.waitFor(AUTH_RESULT_PATTERN, AUTH_RESULT_TIMEOUT_MS);
+    const outcome: AuthOutcome =
+      result === "AUTH_OK" ? "ok" : result === "AUTH_DENY" ? "denied" : result === "AUTH_NET_FAIL" ? "server_fail" : "failed";
     trace?.(
-      sent
-        ? `응답값 전송 완료 · 스캔 ${tScan - t0}ms / 연결 ${tConn - tScan}ms / nonce ${tNonce - tConn}ms / 전송 ${Date.now() - tNonce}ms`
-        : "응답값 전송 실패",
+      `${result ?? `결과 없음(${AUTH_RESULT_TIMEOUT_MS / 1000}초 초과 또는 연결 끊김)`}` +
+        ` · 스캔 ${tScan - t0}ms / 연결 ${tConn - tScan}ms / nonce ${tNonce - tConn}ms / 서버 결과 ${Date.now() - tSent}ms`,
     );
-    return sent;
+    if (outcome === "ok") {
+      // 다른 기기 기록은 건드리지 않는다(이탈 시 각자 초기화된다).
+      // 겹친 지오펜스에서 먼저 연 기기의 성공 기록을 지우면 재등록 시 initial Enter로 그 기기가 다시 열린다.
+      await updateDeviceStatus((list) => {
+        const status = list.find((s) => s.device_uuid === ioTDevice.device_uuid);
+        if (status) status.bleSuccess = true;
+        return list;
+      });
+    }
+    return outcome;
   } finally {
-    // 실패하면 직접 끊는다. 남겨 두면 ESP 인증 타이머가 끊을 때까지 단일 연결을 점유해 광고가 멈추고 다음 스캔에서 안 보인다.
-    if (!sent) await connected.cancelConnection().catch(() => {});
+    inbox.close();
+    // 남겨 두면 ESP 인증 타이머가 끊을 때까지 단일 연결을 점유해 광고가 멈추고 다음 스캔에서 안 보인다.
+    await connected.cancelConnection().catch(() => {});
   }
 };
 
@@ -570,13 +592,20 @@ const SESSION_CONNECT_OPTIONS: ConnectionOptions = { refreshGatt: "OnConnected" 
 // 보낸 순서와 도착 순서가 어긋나도 되도록 형식으로 골라 꺼낸다.
 const openInbox = (connected: Device, ioTDevice: IoTDevice) => {
   const inbox: string[] = [];
-  const waiters = new Set<{ pattern: RegExp; deliver: (message: string) => void }>();
+  const waiters = new Set<{ pattern: RegExp; deliver: (message: string | null) => void }>();
+  let closed = false;
 
   const subscription = connected.monitorCharacteristicForService(
     ioTDevice.ble_uuids.ble_service_uuid,
     ioTDevice.ble_uuids.ble_read_uuid,
     (err, char) => {
-      if (err || !char?.value) return;
+      // 연결이 끊기면 구독이 오류로 끝난다. 남은 대기는 시간 초과까지 기다리지 않고 바로 null로 끝낸다.
+      if (err) {
+        closed = true;
+        [...waiters].forEach((w) => w.deliver(null));
+        return;
+      }
+      if (!char?.value) return;
       const message = Buffer.from(char.value, "base64").toString("utf-8");
       const waiter = [...waiters].find((w) => w.pattern.test(message));
       if (waiter) waiter.deliver(message);
@@ -591,15 +620,20 @@ const openInbox = (connected: Device, ioTDevice: IoTDevice) => {
         resolve(inbox.splice(index, 1)[0]);
         return;
       }
+      if (closed) {
+        resolve(null);
+        return;
+      }
       const waiter = {
         pattern,
-        deliver: (message: string) => {
-          clearTimeout(timer);
+        deliver: (message: string | null) => {
+          clearBgTimeout(timer);
           waiters.delete(waiter);
           resolve(message);
         },
       };
-      const timer = setTimeout(() => {
+      // 백그라운드(지오펜스 자동 인증)에서도 쓰므로 JS 타이머 대신 네이티브 타이머를 쓴다
+      const timer = setBgTimeout(() => {
         waiters.delete(waiter);
         resolve(null);
       }, timeoutMs);

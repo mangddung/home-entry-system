@@ -7,7 +7,7 @@ import {
   stopTrackingService,
 } from "@/lib/background-tracking";
 import { authLog, short } from "@/lib/auth-log";
-import { scanDevice, stopScan, userTokenExchange } from "@/lib/ble";
+import { scanDevice, stopScan, userTokenExchange, type AuthOutcome } from "@/lib/ble";
 import { getThresholdFor, recordTrigger } from "@/lib/proximity";
 import { ScanMode } from "react-native-ble-plx";
 import { loadDevices, updateDeviceStatus } from "@/lib/api/devices";
@@ -338,12 +338,12 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
       attempts++;
       triggerRssi = null;
       const attemptAt = Date.now();
-      let sent = false;
+      let outcome: AuthOutcome = "failed";
       try {
         if (burst) {
-          sent = await userTokenExchange(device, { scanMode: ScanMode.LowLatency, timeoutMs: 30000, gate, trace });
+          outcome = await userTokenExchange(device, { scanMode: ScanMode.LowLatency, timeoutMs: 30000, gate, trace });
         } else if (!gate) {
-          sent = await userTokenExchange(device, saving);
+          outcome = await userTokenExchange(device, saving);
         } else {
           // 절전 스캔은 샘플이 ~4초에 한 묶음이라 RSSI 판정이 늦다 → 발견만 하고,
           // 잡히면 빠른 스캔으로 재승격해 다가오는 RSSI를 추적한다(못 넘으면 다음 회차에 다시 절전).
@@ -353,7 +353,7 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
             trace(`절전 스캔에서 발견(RSSI ${seen[0].rssi ?? "?"}dBm) → 빠른 스캔으로 ${secs(BLE_PROMOTE_MS)} 승격`);
             void setBleScanning(uuid, "fast");
             lastBurst = null; // 다음 회차에 절전 표시로 되돌린다
-            sent = await userTokenExchange(device, { scanMode: ScanMode.LowLatency, timeoutMs: BLE_PROMOTE_MS, gate, trace });
+            outcome = await userTokenExchange(device, { scanMode: ScanMode.LowLatency, timeoutMs: BLE_PROMOTE_MS, gate, trace });
           }
         }
       } catch (e) {
@@ -361,14 +361,20 @@ const startBleTracking = async (initialDevice: IoTDevice, enteredAt: number) => 
         authLog("ERROR", `${dev} 시도 #${attempts} 예외: ${e}`);
       }
 
-      if (sent) {
+      if (outcome === "ok") {
         const now = Date.now();
         authLog(
           "AUTH",
-          `${dev} 응답값 전송 성공 (시도 #${attempts}) · 트리거 RSSI ${triggerRssi ?? "없음(문턱 없음)"}${threshold != null ? ` / 문턱 ${threshold}dBm` : ""}` +
-            ` · 이번 시도 ${now - attemptAt}ms · 추적 시작 후 ${secs(now - startedAt)} · 지오펜스 진입 후 ${secs(now - enteredAt)}` +
-            ` · 서버 결과는 PUSH 줄 확인`,
+          `${dev} 인증 성공 (시도 #${attempts}) · 트리거 RSSI ${triggerRssi ?? "없음(문턱 없음)"}${threshold != null ? ` / 문턱 ${threshold}dBm` : ""}` +
+            ` · 이번 시도 ${now - attemptAt}ms · 추적 시작 후 ${secs(now - startedAt)} · 지오펜스 진입 후 ${secs(now - enteredAt)}`,
         );
+      } else if (outcome === "denied") {
+        // 다시 보내도 같은 결과다. 사유는 서버 푸시(PUSH 줄)로 온다. 다음 진입 때 다시 시도한다.
+        authLog("AUTH", `${dev} 인증 거부 (시도 #${attempts}) → 추적 중단 · 사유는 PUSH 줄 확인`);
+        bleStopReason.set(uuid, "인증 거부");
+        break;
+      } else if (outcome === "server_fail") {
+        authLog("AUTH", `${dev} 기기가 서버에 연결 실패 (시도 #${attempts}) → 재시도`);
       }
 
       const storedDeviceStatus: string | null = await getTokenSecure(DEVICE_STATUS_KEY);

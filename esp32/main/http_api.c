@@ -362,23 +362,28 @@ static void task_validate_token(void *arg)
             ESP_LOGI(TAG, "Token validation OK");
             led_notify_success();
             servo_activate();
-            ble_server_disconnect();
+            ble_server_auth_result("AUTH_OK");
             break;
         case 400:
             ESP_LOGW(TAG, "Token validation bad request (400)");
             led_notify_fail();
+            ble_server_auth_result("AUTH_DENY");
             break;
         case 401:
             ESP_LOGW(TAG, "Token validation unauthorized (401)");
             led_notify_fail();
+            ble_server_auth_result("AUTH_DENY");
             break;
         case 0:
             ESP_LOGE(TAG, "Token validation request failed (network / unreachable)");
             led_notify_fail();
+            ble_server_auth_result("AUTH_NET_FAIL");
             break;
         default:
             ESP_LOGW(TAG, "Token validation HTTP %d", status);
             led_notify_fail();
+            // 요청 제한·서버 오류는 다시 시도하면 될 수 있다. 그 외 4xx는 거부로 본다.
+            ble_server_auth_result(status == 429 || status >= 500 ? "AUTH_NET_FAIL" : "AUTH_DENY");
             break;
     }
     s_validating = false;

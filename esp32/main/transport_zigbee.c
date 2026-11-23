@@ -531,18 +531,20 @@ static void zb_validate_task(void *arg)
 {
     validate_args_t *a = arg;
     zb_msg_t rsp;
-    bool ok = zb_request(ZB_MSG_VALIDATE_TOKEN, a->data, sizeof(a->data),
-                         ZB_MSG_AUTH_RESULT, &rsp, AUTH_TIMEOUT_MS) &&
-              rsp.len >= 1 && rsp.data[0] == ZB_STATUS_OK;
+    bool replied = zb_request(ZB_MSG_VALIDATE_TOKEN, a->data, sizeof(a->data),
+                              ZB_MSG_AUTH_RESULT, &rsp, AUTH_TIMEOUT_MS);
+    bool ok = replied && rsp.len >= 1 && rsp.data[0] == ZB_STATUS_OK;
     free(a);
     if (ok) {
         ESP_LOGI(TAG, "Token validation OK");
         led_notify_success();
         servo_activate();
-        ble_server_disconnect();
+        ble_server_auth_result("AUTH_OK");
     } else {
-        ESP_LOGW(TAG, "Token validation failed");
+        ESP_LOGW(TAG, "Token validation failed (%s)", replied ? "denied" : "no reply");
         led_notify_fail();
+        // 응답이 없으면 게이트웨이·서버 연결 문제라 다시 시도하면 될 수 있다
+        ble_server_auth_result(replied ? "AUTH_DENY" : "AUTH_NET_FAIL");
     }
     vTaskDelete(NULL);
 }

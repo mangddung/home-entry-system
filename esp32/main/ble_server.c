@@ -555,6 +555,20 @@ void ble_server_clear_bonds(void)
     ble_store_clear();
 }
 
+#define AUTH_RESULT_FLUSH_MS 300  // 끊기 전에 notify가 전송될 시간
+
+void ble_server_auth_result(const char *code)
+{
+    ble_notify_str(code);
+    if (strcmp(code, "AUTH_OK") == 0) {
+        vTaskDelay(pdMS_TO_TICKS(AUTH_RESULT_FLUSH_MS));
+        ble_server_disconnect();
+    } else {
+        // 실패는 앱이 받고 끊는다. 앱이 응답 없이 사라져도 연결이 남지 않게 인증 타이머를 다시 건다.
+        auth_timer_start();
+    }
+}
+
 // ── OTP 발급: 앱이 notify를 구독한 뒤에만 호출된다 ───────────────────────────
 static void issue_otp(uint16_t conn_handle)
 {
