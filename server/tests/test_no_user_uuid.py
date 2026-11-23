@@ -140,23 +140,36 @@ with _db.Session() as s:
     s.query(DeviceManagement).filter_by(device_uuid=DEV).update({"setup_user_uuid": None, "setup_requested_at": None})
     s.commit()
 
-assert setup_token(A).status_code == 200
+r = setup_token(A)
+assert r.status_code == 200
+tok_a = r.get_json()["data"]["setup_token"]
+assert tok_a != "setup-tok"
+print("[ok] 새 점유자에게는 setup_token을 새로 발급한다(리셋 전에 받아간 토큰은 무효)")
 assert setup_token(B).status_code == 409
 print("[ok] 다른 사용자가 점유 중이면 setup-token 발급을 거부한다")
-assert setup_token(A).status_code == 200
-print("[ok] 같은 사용자는 다시 받을 수 있다")
+r = setup_token(A)
+assert r.status_code == 200 and r.get_json()["data"]["setup_token"] == tok_a
+print("[ok] 같은 사용자는 다시 받을 수 있고 토큰도 그대로다")
 
 # 점유 만료 후에는 다른 사용자가 가져갈 수 있다
 with _db.Session() as s:
     d = s.query(DeviceManagement).filter_by(device_uuid=DEV).one()
     d.setup_requested_at = datetime.datetime.utcnow() - SETUP_CLAIM_TTL - datetime.timedelta(seconds=1)
     s.commit()
-assert setup_token(B).status_code == 200
-print("[ok] 점유가 만료되면 다른 사용자가 이어받는다")
+r = setup_token(B)
+assert r.status_code == 200
+tok_b = r.get_json()["data"]["setup_token"]
+assert tok_b != tok_a
+print("[ok] 점유가 만료되면 다른 사용자가 이어받고 토큰이 바뀐다")
+
+# A가 기기에 넘긴 토큰으로 셋업이 끝나도 B가 master가 되지 않는다(만료 점유 가로채기 차단)
+r = c.post("/iot/validate_setup", headers=dev_hdr, json={"setup_token": tok_a, "secret_key": SECRET})
+assert r.status_code == 400, r.data
+print("[ok] 이전 점유자의 토큰으로는 셋업이 완료되지 않는다")
 
 # validate_setup: 본문에 user_uuid를 보내도 setup-token 요청자(B)가 master가 된다
 r = c.post("/iot/validate_setup", headers=dev_hdr,
-           json={"setup_token": "setup-tok", "secret_key": SECRET, "user_uuid": A})
+           json={"setup_token": tok_b, "secret_key": SECRET, "user_uuid": A})
 assert r.status_code == 200, r.data
 with _db.Session() as s:
     masters = [m.user_uuid for m in s.query(UserDeviceMapping).filter_by(device_uuid=DEV, role="master")]

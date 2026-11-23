@@ -8,6 +8,8 @@ os.chdir(SERVER)
 load_dotenv()
 
 os.environ["JWT_SECRET"] = "test-secret"
+for k in ("SETUP_SERVICE_UUID", "SETUP_WRITE_UUID", "SETUP_READ_UUID"):
+    os.environ.setdefault(k, "x")
 
 from app.utils.database import database as _db
 
@@ -20,10 +22,15 @@ import jwt
 from flask import Flask
 from app.utils.limiter import limiter
 from app.routes.iot import init as iot_init
+from app.routes.client import devices as client_devices
+
+# "Bearer <user>"를 그 사용자로 인증된 요청으로 본다
+client_devices.verify_access_token = lambda h: ({"sub": h.removeprefix("Bearer ")}, None) if h else (None, "missing")
 
 app = Flask(__name__)
 limiter.init_app(app)
 app.register_blueprint(iot_init.iot_bp)
+app.register_blueprint(client_devices.client_bp)
 c = app.test_client()
 
 exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
@@ -47,5 +54,17 @@ for _ in range(20):
 assert post("dev-c", secret="forged") == 429
 assert post("dev-c") != 429
 print("[ok] 위조 토큰은 IP로 세므로 그 기기의 제한을 소모하지 못한다")
+
+
+def setup_req(user):
+    return c.post("/client/setup-token", headers={"Authorization": "Bearer " + user},
+                  json={"device_uuid": "no-such-device"}).status_code
+
+
+for _ in range(10):
+    assert setup_req("u-1") != 429
+assert setup_req("u-1") == 429
+assert setup_req("u-2") != 429
+print("[ok] setup-token은 사용자별로 분당 10회로 제한된다")
 
 print("\n전체 통과")

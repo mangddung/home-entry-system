@@ -21,8 +21,16 @@ from sqlalchemy.orm import joinedload
 from app.utils.device_utils import SETUP_CLAIM_TTL, battery_percent, hw_fields
 from app.utils.mqtt_utils import notify_zigbee_check_registration, open_zigbee_join
 from app.routes.client.auth import verify_access_token
+from app.utils.limiter import limiter
+from flask_limiter.util import get_remote_address
 
 client_bp = Blueprint("client", __name__, url_prefix="/client")
+
+
+def _user_rate_key() -> str:
+    """유효한 사용자 토큰이면 사용자별로 센다. 프록시 뒤에서는 IP가 모두 같아 IP로 세면 남의 셋업까지 막는다."""
+    payload, err = verify_access_token(request.headers.get("Authorization", ""))
+    return payload["sub"] if not err else get_remote_address()
 
 SETUP_SERVICE_UUID = os.environ["SETUP_SERVICE_UUID"]
 SETUP_WRITE_UUID = os.environ["SETUP_WRITE_UUID"]
@@ -160,6 +168,7 @@ def get_setup_uuid():
 
 # POST /client/setup-token
 @client_bp.route("/setup-token", methods=["POST"])
+@limiter.limit("10/minute", key_func=_user_rate_key)  # 미등록 기기 점유를 반복해 셋업을 막는 것을 늦춘다
 def get_setup_token():
     payload, err = verify_access_token(request.headers.get("Authorization", ""))
     if err:
@@ -185,19 +194,29 @@ def get_setup_token():
         # 요청자를 master 후보로 점유한다. 다른 사용자가 점유 중(미만료)이면 거부.
         # 조건부 UPDATE 한 번으로 확인과 기록을 원자적으로 처리한다.
         now = datetime.utcnow()
+        claimable = or_(
+            DeviceManagement.setup_user_uuid.is_(None),
+            DeviceManagement.setup_user_uuid == user_uuid,
+            DeviceManagement.setup_requested_at < now - SETUP_CLAIM_TTL,
+        )
+        # 점유자가 바뀌면 setup_token을 새로 발급한다. 이전 점유자가 기기에 넘긴 토큰이 무효가 되어,
+        # 만료된 점유를 가로챈 사람이 이전 셋업의 완료로 master가 되는 경로를 막는다.
+        # 같은 사용자의 재요청(재시도)은 토큰을 유지한다. 같은 트랜잭션이라 아래 점유 UPDATE와 사이에 끼어들 수 없다.
+        session.query(DeviceManagement).filter(
+            DeviceManagement.device_uuid == device_uuid,
+            claimable,
+            or_(DeviceManagement.setup_user_uuid.is_(None), DeviceManagement.setup_user_uuid != user_uuid),
+        ).update({"setup_token": secrets.token_urlsafe(32)}, synchronize_session=False)
         claimed = session.query(DeviceManagement).filter(
             DeviceManagement.device_uuid == device_uuid,
-            or_(
-                DeviceManagement.setup_user_uuid.is_(None),
-                DeviceManagement.setup_user_uuid == user_uuid,
-                DeviceManagement.setup_requested_at < now - SETUP_CLAIM_TTL,
-            ),
+            claimable,
         ).update({"setup_user_uuid": user_uuid, "setup_requested_at": now}, synchronize_session=False)
         if not claimed:
+            session.rollback()
             return jsonify({"status": "error", "message": "setup in progress by another user"}), 409
         session.commit()
         transport = device.transport
-        setup_token = device.setup_token
+        setup_token = session.query(DeviceManagement.setup_token).filter_by(device_uuid=device_uuid).scalar()
 
     # Zigbee 모델은 기기가 이제 게이트웨이 네트워크에 가입해야 한다(앱이 곧 셋업 토큰을 BLE로 넘긴다).
     # 이미 등록된 기기로는 열지 않는다(아무 device_uuid로 가입 창을 여는 것을 막는다).
