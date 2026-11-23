@@ -383,7 +383,7 @@ static void process_write_payload(const char *msg, uint16_t len)
     s_current_otp[0] = '\0';
 
     // buf is heap-allocated and null-terminated, so msg is safe to pass directly
-    transport_validate_token(msg, nonce);
+    transport_validate_token(msg, nonce, s_conn_gen);
 }
 
 static int chr_write_access(uint16_t conn_handle, uint16_t attr_handle,
@@ -557,15 +557,49 @@ void ble_server_clear_bonds(void)
 
 #define AUTH_RESULT_FLUSH_MS 300  // 끊기 전에 notify가 전송될 시간
 
-void ble_server_auth_result(const char *code)
+typedef struct {
+    struct ble_npl_event ev;  // 결과 반영을 NimBLE 호스트 태스크로 넘긴다
+    uint32_t conn_gen;
+    bool disconnect;
+    char code[16];
+} auth_result_t;
+
+// 검증하는 동안 연결이 바뀌었으면 버린다. 검증은 최대 수십 초라 그 사이 다른 폰이 연결할 수 있고,
+// 남의 결과가 그 폰에 가면 앱이 성공(또는 거부)으로 잘못 기록한다.
+static void auth_result_apply(struct ble_npl_event *ev)
 {
-    ble_notify_str(code);
-    if (strcmp(code, "AUTH_OK") == 0) {
-        vTaskDelay(pdMS_TO_TICKS(AUTH_RESULT_FLUSH_MS));
-        ble_server_disconnect();
+    auth_result_t *r = ble_npl_event_get_arg(ev);
+    if (r->conn_gen != s_conn_gen || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "Auth result dropped: connection changed");
+    } else if (r->disconnect) {
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     } else {
+        ble_notify_str(r->code);
         // 실패는 앱이 받고 끊는다. 앱이 응답 없이 사라져도 연결이 남지 않게 인증 타이머를 다시 건다.
-        auth_timer_start();
+        if (strcmp(r->code, "AUTH_OK") != 0) auth_timer_start();
+    }
+    ble_npl_event_deinit(ev);  // init이 이벤트 메모리를 따로 잡는다
+    free(r);
+}
+
+static void post_auth_result(uint32_t conn_gen, const char *code, bool disconnect)
+{
+    auth_result_t *r = calloc(1, sizeof(*r));
+    if (!r) return;
+    r->conn_gen   = conn_gen;
+    r->disconnect = disconnect;
+    if (code) strlcpy(r->code, code, sizeof(r->code));
+    ble_npl_event_init(&r->ev, auth_result_apply, r);
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &r->ev);
+}
+
+void ble_server_auth_result(const char *code, uint32_t conn_gen)
+{
+    post_auth_result(conn_gen, code, false);
+    if (strcmp(code, "AUTH_OK") == 0) {
+        // 대기는 검증 태스크에서 한다. 호스트 태스크에서 기다리면 그동안 BLE가 멈춘다.
+        vTaskDelay(pdMS_TO_TICKS(AUTH_RESULT_FLUSH_MS));
+        post_auth_result(conn_gen, NULL, true);
     }
 }
 

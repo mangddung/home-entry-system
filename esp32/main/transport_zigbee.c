@@ -525,6 +525,7 @@ void transport_start(void)
 
 typedef struct {
     uint8_t data[8 + 32];  // nonce + mac
+    uint32_t conn_gen;
 } validate_args_t;
 
 static void zb_validate_task(void *arg)
@@ -534,32 +535,41 @@ static void zb_validate_task(void *arg)
     bool replied = zb_request(ZB_MSG_VALIDATE_TOKEN, a->data, sizeof(a->data),
                               ZB_MSG_AUTH_RESULT, &rsp, AUTH_TIMEOUT_MS);
     bool ok = replied && rsp.len >= 1 && rsp.data[0] == ZB_STATUS_OK;
+    const uint32_t conn_gen = a->conn_gen;
     free(a);
     if (ok) {
         ESP_LOGI(TAG, "Token validation OK");
         led_notify_success();
         servo_activate();
-        ble_server_auth_result("AUTH_OK");
+        ble_server_auth_result("AUTH_OK", conn_gen);
     } else {
         ESP_LOGW(TAG, "Token validation failed (%s)", replied ? "denied" : "no reply");
         led_notify_fail();
         // 응답이 없으면 게이트웨이·서버 연결 문제라 다시 시도하면 될 수 있다
-        ble_server_auth_result(replied ? "AUTH_DENY" : "AUTH_NET_FAIL");
+        ble_server_auth_result(replied ? "AUTH_DENY" : "AUTH_NET_FAIL", conn_gen);
     }
     vTaskDelete(NULL);
 }
 
-void transport_validate_token(const char *mac_hex, const char *nonce_hex)
+void transport_validate_token(const char *mac_hex, const char *nonce_hex, uint32_t conn_gen)
 {
     validate_args_t *a = malloc(sizeof(*a));
-    if (!a) return;
+    if (!a) {
+        ble_server_auth_result("AUTH_NET_FAIL", conn_gen);
+        return;
+    }
     if (!hex_to_bytes(nonce_hex, a->data, 8) || !hex_to_bytes(mac_hex, a->data + 8, 32)) {
         ESP_LOGE(TAG, "validate: bad hex");
         free(a);
         led_notify_fail();
+        ble_server_auth_result("AUTH_DENY", conn_gen);
         return;
     }
-    xTaskCreate(zb_validate_task, "zb_val", 4096, a, 5, NULL);
+    a->conn_gen = conn_gen;
+    if (xTaskCreate(zb_validate_task, "zb_val", 4096, a, 5, NULL) != pdPASS) {
+        free(a);
+        ble_server_auth_result("AUTH_NET_FAIL", conn_gen);
+    }
 }
 
 // 서버(server/mqtt_worker.py)와 같은 규칙으로 BLE UUID 4개를 만든다:

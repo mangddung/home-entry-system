@@ -284,6 +284,7 @@ static void task_iot_init(void *arg)
 typedef struct {
     char encrypted_token[2048];
     char nonce[17];   // 16-hex-char OTP + NUL
+    uint32_t conn_gen;
 } validate_args_t;
 
 // 검증은 동시에 1건만 돌린다. 9KB 스택에 TLS까지 쓰는 태스크가 쌓이면 힙이 고갈된다.
@@ -292,12 +293,14 @@ static volatile bool s_validating = false;
 static void task_validate_token(void *arg)
 {
     validate_args_t *a = (validate_args_t *)arg;
+    const uint32_t conn_gen = a->conn_gen;
 
     const size_t body_size = 2200;
     char *body = malloc(body_size);
     if (!body) {
         ESP_LOGE(TAG, "OOM for validate body");
         free(a);
+        ble_server_auth_result("AUTH_NET_FAIL", conn_gen);
         s_validating = false;
         vTaskDelete(NULL);
         return;
@@ -312,6 +315,7 @@ static void task_validate_token(void *arg)
     if (n < 0 || (size_t)n >= body_size) {
         ESP_LOGE(TAG, "validate body truncated – aborting");
         free(body);
+        ble_server_auth_result("AUTH_NET_FAIL", conn_gen);
         s_validating = false;
         vTaskDelete(NULL);
         return;
@@ -362,28 +366,28 @@ static void task_validate_token(void *arg)
             ESP_LOGI(TAG, "Token validation OK");
             led_notify_success();
             servo_activate();
-            ble_server_auth_result("AUTH_OK");
+            ble_server_auth_result("AUTH_OK", conn_gen);
             break;
         case 400:
             ESP_LOGW(TAG, "Token validation bad request (400)");
             led_notify_fail();
-            ble_server_auth_result("AUTH_DENY");
+            ble_server_auth_result("AUTH_DENY", conn_gen);
             break;
         case 401:
             ESP_LOGW(TAG, "Token validation unauthorized (401)");
             led_notify_fail();
-            ble_server_auth_result("AUTH_DENY");
+            ble_server_auth_result("AUTH_DENY", conn_gen);
             break;
         case 0:
             ESP_LOGE(TAG, "Token validation request failed (network / unreachable)");
             led_notify_fail();
-            ble_server_auth_result("AUTH_NET_FAIL");
+            ble_server_auth_result("AUTH_NET_FAIL", conn_gen);
             break;
         default:
             ESP_LOGW(TAG, "Token validation HTTP %d", status);
             led_notify_fail();
             // 요청 제한·서버 오류는 다시 시도하면 될 수 있다. 그 외 4xx는 거부로 본다.
-            ble_server_auth_result(status == 429 || status >= 500 ? "AUTH_NET_FAIL" : "AUTH_DENY");
+            ble_server_auth_result(status == 429 || status >= 500 ? "AUTH_NET_FAIL" : "AUTH_DENY", conn_gen);
             break;
     }
     s_validating = false;
@@ -527,24 +531,30 @@ void http_fetch_iot_init(void)
 }
 
 void http_request_validate_token(const char *encrypted_token,
-                                  const char *nonce)
+                                  const char *nonce, uint32_t conn_gen)
 {
+    // 아래 실패는 모두 이 요청이 서버에 가지 못한 경우다. 말없이 버리면 앱이 결과를 기다리다 시간 초과되므로
+    // 다시 시도하라고 알린다(앞 연결의 검증이 아직 도는 중일 때가 대표적).
     if (s_validating) {
         ESP_LOGW(TAG, "Token validation already running – request dropped");
+        ble_server_auth_result("AUTH_NET_FAIL", conn_gen);
         return;
     }
     validate_args_t *a = malloc(sizeof(validate_args_t));
     if (!a) {
         ESP_LOGE(TAG, "OOM for validate_args");
+        ble_server_auth_result("AUTH_NET_FAIL", conn_gen);
         return;
     }
     strlcpy(a->encrypted_token, encrypted_token, sizeof(a->encrypted_token));
     strlcpy(a->nonce,           nonce,           sizeof(a->nonce));
+    a->conn_gen = conn_gen;
     s_validating = true;
     if (xTaskCreate(task_validate_token, "http_val", 9216, a, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "validate task create failed");
         s_validating = false;
         free(a);
+        ble_server_auth_result("AUTH_NET_FAIL", conn_gen);
     }
 }
 

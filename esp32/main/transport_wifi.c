@@ -105,9 +105,9 @@ void transport_start(void)
     }
 }
 
-void transport_validate_token(const char *mac_hex, const char *nonce_hex)
+void transport_validate_token(const char *mac_hex, const char *nonce_hex, uint32_t conn_gen)
 {
-    http_request_validate_token(mac_hex, nonce_hex);
+    http_request_validate_token(mac_hex, nonce_hex, conn_gen);
 }
 
 void transport_notify_reset(void)

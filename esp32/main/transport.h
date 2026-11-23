@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include "sdkconfig.h"
 
 // 서버 통신 경로. 모델(Kconfig DOORLOCK_TRANSPORT_*)마다 구현 하나만 빌드된다.
@@ -22,7 +23,8 @@ void transport_init(void);
 void transport_start(void);
 
 // 근접 열기 인증 요청(비동기). 결과에 따라 LED·서보·BLE 연결 끊기까지 처리한다.
-void transport_validate_token(const char *mac_hex, const char *nonce_hex);
+// conn_gen: 요청을 보낸 BLE 연결의 세대. 결과 알림은 그 연결에만 간다(ble_server_auth_result).
+void transport_validate_token(const char *mac_hex, const char *nonce_hex, uint32_t conn_gen);
 
 // 셋업 Step 6~9: 앱이 보낸 자격 JSON으로 네트워크 연결 + 서버 등록 확인(동기, 셋업 태스크에서 호출).
 // 진행 상황은 notify로 앱에 보낸다(ACK, 실패 코드, REGISTERED).
