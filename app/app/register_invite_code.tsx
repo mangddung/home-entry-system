@@ -6,9 +6,10 @@ import { loadDevices, updateDeviceName } from "@/lib/api/devices";
 import { extractInviteCode } from "@/lib/api/members";
 import { MAX_DEVICES_PER_USER } from "@/lib/constants";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { CameraView, useCameraPermissions } from "expo-camera";
 import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function RegisterInviteCodeScreen() {
@@ -28,9 +29,31 @@ export default function RegisterInviteCodeScreen() {
   const [calibratePrompt, setCalibratePrompt] = useState(false);
   const calibrateChosenRef = useRef(false); // CustomAlert는 버튼 후 onRequestClose도 부르므로 이동은 거기서 한 번만
   const [nickname, setNickname] = useState("");
+  const [, requestCameraPermission] = useCameraPermissions();
+  const [scannerVisible, setScannerVisible] = useState(false);
+  const scannedRef = useRef(false); // 한 프레임에 여러 번 인식돼도 한 번만 반영
+  const [cameraDenied, setCameraDenied] = useState(false);
 
   const showAlert = (title: string, message?: string, onClose?: () => void) =>
     setAlertConfig({ title, message, onClose });
+
+  const openScanner = async () => {
+    const permission = await requestCameraPermission();
+    if (!permission.granted) {
+      if (permission.canAskAgain) showAlert("카메라 권한 필요", "QR 코드를 스캔하려면 카메라 권한을 허용해주세요.");
+      else setCameraDenied(true);
+      return;
+    }
+    scannedRef.current = false;
+    setScannerVisible(true);
+  };
+
+  const handleScanned = ({ data }: { data: string }) => {
+    if (scannedRef.current) return;
+    scannedRef.current = true;
+    setInviteCode(data);
+    setScannerVisible(false);
+  };
 
   const handleSubmit = async (raw?: string) => {
     const code = extractInviteCode(raw ?? inviteCode);
@@ -190,8 +213,43 @@ export default function RegisterInviteCodeScreen() {
           >
             <Text style={styles.buttonText}>{loading ? "처리 중..." : "확인"}</Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.button, styles.scanButton, { backgroundColor: isDark ? "#2A2D31" : "#F3F4F6" }]}
+            onPress={openScanner}
+            disabled={loading}
+          >
+            <MaterialCommunityIcons name="qrcode-scan" size={18} color={colors.text} />
+            <Text style={[styles.buttonText, { color: colors.text }]}>QR 코드 스캔</Text>
+          </TouchableOpacity>
         </KeyboardAvoidingView>
       )}
+
+      <Modal visible={scannerVisible} animationType="slide" onRequestClose={() => setScannerVisible(false)}>
+        <View style={styles.scannerContainer}>
+          <CameraView
+            style={StyleSheet.absoluteFill}
+            facing="back"
+            barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+            onBarcodeScanned={handleScanned}
+          />
+          <View style={styles.scannerFrame} pointerEvents="none" />
+          <Text style={styles.scannerHint}>초대 QR 코드를 사각형 안에 맞춰주세요</Text>
+          <TouchableOpacity style={styles.scannerClose} onPress={() => setScannerVisible(false)}>
+            <Text style={styles.buttonText}>닫기</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
+      <CustomAlert
+        visible={cameraDenied}
+        title="카메라 권한이 꺼져 있습니다"
+        message="설정에서 카메라 권한을 허용하면 QR 코드를 스캔할 수 있습니다."
+        buttons={[
+          { text: "취소", style: "cancel" },
+          { text: "설정 열기", onPress: () => { void Linking.openSettings(); } },
+        ]}
+        onRequestClose={() => setCameraDenied(false)}
+      />
+
       <CustomAlert
         visible={!!alertConfig}
         title={alertConfig?.title ?? ""}
@@ -292,6 +350,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   buttonDisabled: { opacity: 0.6 },
+  scanButton: { flexDirection: "row", justifyContent: "center", gap: 8 },
+  scannerContainer: { flex: 1, backgroundColor: "#000", alignItems: "center", justifyContent: "center" },
+  scannerFrame: { width: 240, height: 240, borderWidth: 2, borderColor: "#fff", borderRadius: 16 },
+  scannerHint: { color: "#fff", fontSize: 14, marginTop: 20 },
+  scannerClose: {
+    position: "absolute",
+    bottom: 48,
+    backgroundColor: "rgba(255,255,255,0.2)",
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 32,
+  },
   buttonText: { color: "#fff", fontSize: 15, fontWeight: "600" },
   modalBackdrop: {
     flex: 1,

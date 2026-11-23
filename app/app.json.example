@@ -94,6 +94,13 @@
         }
       ],
       [
+        "expo-camera",
+        {
+          "cameraPermission": "초대 QR 코드를 스캔하려면 카메라 권한이 필요합니다.",
+          "recordAudioAndroid": false
+        }
+      ],
+      [
         "expo-notifications",
         {
           "icon": "./assets/images/android-icon-monochrome.png",
