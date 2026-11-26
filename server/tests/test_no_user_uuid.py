@@ -188,4 +188,37 @@ r = c.post("/iot/validate_setup", headers=hdr2, json={"setup_token": new_setup, 
 assert r.status_code == 400, r.data
 print("[ok] 요청자 없이는 validate_setup이 거부된다")
 
+# ── 리셋 증명: 초기화 때 서버에 알리지 못한 기기(서버에는 B가 master로 남음) ──
+def reset_proof(svc_uuid, secret=SECRET):
+    return hmac.new(bytes.fromhex(secret), f"reset|{svc_uuid}".encode(), hashlib.sha256).hexdigest()
+
+
+def setup_token_with_proof(uid, proof):
+    as_user(uid)
+    return c.post("/client/setup-token", headers={"Authorization": "Bearer x"},
+                  json={"device_uuid": DEV, "reset_proof": proof})
+
+
+with _db.Session() as s:
+    new_svc = s.query(DeviceManagement).filter_by(device_uuid=DEV).one().ble_service_uuid
+assert new_svc != BLE["ble_service_uuid"]
+
+assert setup_token_with_proof(A, reset_proof(BLE["ble_service_uuid"])).status_code == 403
+print("[ok] 지난 셋업의 서비스 UUID로 만든 증명은 거부된다")
+assert setup_token_with_proof(A, reset_proof(new_svc, os.urandom(16).hex())).status_code == 403
+print("[ok] 다른 키로 만든 증명은 거부된다")
+
+sent.clear()
+r = setup_token_with_proof(A, reset_proof(new_svc))
+assert r.status_code == 200, r.data
+with _db.Session() as s:
+    assert s.query(UserDeviceMapping).filter_by(device_uuid=DEV).count() == 0
+    d = s.query(DeviceManagement).filter_by(device_uuid=DEV).one()
+    assert d.setup_user_uuid == A and d.ble_service_uuid == new_svc
+assert any(u == B for u, _ in sent), sent
+print("[ok] 맞는 증명이면 리셋이 반영되어 새 사용자가 점유하고 이전 master에게 알린다")
+
+assert setup_token_with_proof(B, reset_proof(new_svc)).status_code == 409
+print("[ok] 리셋 뒤 같은 증명을 다시 써도 새 점유를 빼앗지 못한다")
+
 print("\n전체 통과")

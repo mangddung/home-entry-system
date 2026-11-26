@@ -419,9 +419,10 @@ export default function DeviceSetupScreen() {
                 setIsSubmitting(true);
                 // 펌웨어가 코드를 소문자로 바꿔 해시하므로 입력도 소문자로 맞춘다
                 await sendSetupCode(connected, setupDevice!, receivedNonce, setupCode.trim().toLowerCase());
-                const device_uuid = await receiveData(connected!, setupDevice!);
-                setDeviceUuid(device_uuid!);
-                const setup = await fetchDeviceSetupToken(device_uuid);
+                // 기기는 "<device_uuid>:<리셋 증명>"을 보낸다(증명은 만들 수 있을 때만 붙는다)
+                const [device_uuid, reset_proof] = ((await receiveData(connected!, setupDevice!)) ?? "").split(":");
+                setDeviceUuid(device_uuid);
+                const setup = await fetchDeviceSetupToken(device_uuid, reset_proof);
                 setIsSubmitting(false);
                 if (!("setup_token" in setup) || typeof setup.setup_token !== "string" || !setup.setup_token) {
                   showAlert("설정 실패", "설정 토큰을 받지 못했습니다. 다시 시도해 주세요.", [

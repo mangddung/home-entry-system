@@ -21,6 +21,7 @@ from sqlalchemy.orm import joinedload
 from app.utils.device_utils import SETUP_CLAIM_TTL, battery_percent, hw_fields
 from app.utils.mqtt_utils import notify_zigbee_check_registration, open_zigbee_join
 from app.routes.client.auth import verify_access_token
+from app.routes.iot.init import reset_device
 from app.utils.limiter import limiter
 from flask_limiter.util import get_remote_address
 
@@ -178,6 +179,22 @@ def get_setup_token():
 
     data = request.get_json(silent=True) or {}
     device_uuid = (data.get("device_uuid") or "").strip()
+
+    # 기기가 초기화됐지만 그때 서버(Wi-Fi)·게이트웨이(Zigbee)에 알리지 못해 이전 master가 남은 경우.
+    # 기기가 셋업 때 앱에 준 리셋 증명 HMAC(기기 비밀키, "reset|<현재 BLE 서비스 UUID>")이 맞으면 여기서 리셋을 반영한다.
+    # 서비스 UUID는 셋업 완료 때마다 새로 정해져(리셋으로는 안 바뀜) 지난 셋업에서 본 증명은 다시 쓸 수 없다 (esp32/main/ble_server.c와 짝).
+    reset_proof = data.get("reset_proof")
+    if isinstance(reset_proof, str) and re.fullmatch(r"[0-9a-f]{64}", reset_proof):
+        with _db.Session() as session:
+            device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()
+            master = session.query(UserDeviceMapping).filter_by(device_uuid=device_uuid, role="master").first()
+            missed_reset = bool(device and device.ble_service_uuid and master and master.user_uuid != user_uuid)
+            if missed_reset:
+                key = bytes.fromhex(decrpyt_key(os.environ["MASTER_KEK"], device.device_secret_key))
+                expected = hmac.new(key, f"reset|{device.ble_service_uuid}".encode(), hashlib.sha256).hexdigest()
+                missed_reset = hmac.compare_digest(expected, reset_proof)
+        if missed_reset:
+            reset_device(device_uuid)
 
     with _db.Session() as session:
         device = session.query(DeviceManagement).filter_by(device_uuid=device_uuid).first()

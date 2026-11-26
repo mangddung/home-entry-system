@@ -811,6 +811,41 @@ static void setup_notify(const char *msg)
     if (om) ble_gatts_notify_custom(s_conn_handle, s_setup_notify_handle, om);
 }
 
+// 셋업 Step 5 메시지: "<device_uuid>:<리셋 증명>". 증명을 만들 수 없으면 device_uuid만 보낸다.
+// 리셋 증명 = HMAC-SHA256(기기 비밀키, "reset|<현재 BLE 서비스 UUID>"). 초기화 때 서버(Wi-Fi)나 게이트웨이(Zigbee)에
+// 알리지 못해 서버에 이전 master가 남아 있어도, 서버가 이 증명으로 초기화를 확인하고 새 사용자에게 셋업을 넘긴다.
+// 서비스 UUID는 셋업이 끝날 때마다 새로 정해져(초기화로는 안 바뀜) 지난 셋업에서 본 증명은 다시 쓸 수 없다.
+static void setup_uuid_msg(char *out, size_t len)
+{
+    strlcpy(out, IOT_DEVICE_UUID, len);
+
+    char input[8 + CFG_UUID_LEN];
+    uint8_t secret[16], mac[32];
+    size_t mac_len = 0, n = strlen(out);
+    if (len < n + 1 + sizeof(mac) * 2 + 1 ||
+        !hex_to_bin(IOT_DEVICE_SECRET_KEY, secret, sizeof(secret))) {
+        return;
+    }
+    snprintf(input, sizeof(input), "reset|%s", g_cfg.ble_svc_uuid);
+
+    psa_crypto_init();
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attr, PSA_KEY_TYPE_HMAC);
+    psa_set_key_bits(&attr, 128);
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
+    psa_set_key_algorithm(&attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+    psa_key_id_t key;
+    if (psa_import_key(&attr, secret, sizeof(secret), &key) != PSA_SUCCESS) return;
+    bool ok = psa_mac_compute(key, PSA_ALG_HMAC(PSA_ALG_SHA_256), (const uint8_t *)input, strlen(input),
+                              mac, sizeof(mac), &mac_len) == PSA_SUCCESS && mac_len == sizeof(mac);
+    psa_destroy_key(key);
+    if (!ok) return;
+
+    out[n++] = ':';
+    for (size_t i = 0; i < sizeof(mac); i++)
+        snprintf(out + n + i * 2, 3, "%02x", mac[i]);
+}
+
 // ── Setup flow task ───────────────────────────────────────────────────────────
 static void setup_flow_task(void *arg)
 {
@@ -842,10 +877,12 @@ static void setup_flow_task(void *arg)
     }
     ESP_LOGI(TAG, "Setup: SHA256 valid");
 
-    // Step 5: send device_uuid to app
+    // Step 5: send device_uuid (+ 리셋 증명) to app
+    char uuid_msg[CFG_UUID_LEN + 1 + 64];
+    setup_uuid_msg(uuid_msg, sizeof(uuid_msg));
     ESP_LOGI(TAG, "Setup: sending device_uuid = [%s] (%d bytes)",
-             IOT_DEVICE_UUID, (int)strlen(IOT_DEVICE_UUID));
-    setup_notify(IOT_DEVICE_UUID);
+             IOT_DEVICE_UUID, (int)strlen(uuid_msg));
+    setup_notify(uuid_msg);
 
     // Steps 6–9: credential receive + network + server validation loop (모델별 transport)
     int retry_count = 0;

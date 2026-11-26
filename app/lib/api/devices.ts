@@ -128,7 +128,8 @@ export const fetchSetupUuid = async () => {
   }
 };
 
-export const fetchDeviceSetupToken = async (device_uuid: any) => {
+// reset_proof: 기기가 셋업 때 device_uuid와 함께 보낸 리셋 증명. 초기화 때 서버에 알리지 못한 기기를 서버가 리셋 처리한다
+export const fetchDeviceSetupToken = async (device_uuid: any, reset_proof?: string) => {
   const access_token = await getTokenSecure(USER_ACCESS_TOKEN_KEY);
   if (!access_token) {
     return { type: "forbidden", message: "액세스 토큰이 없습니다." };
@@ -136,7 +137,7 @@ export const fetchDeviceSetupToken = async (device_uuid: any) => {
   try {
     const response = await axios.post(
       `${BACKEND_URL}/client/setup-token`,
-      { device_uuid: device_uuid },
+      { device_uuid: device_uuid, reset_proof },
       { headers: { Authorization: `Bearer ${access_token}` } },
     );
     const data = response.data.data;
